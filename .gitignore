@@ -1,0 +1,11 @@
+runs/
+cache/
+calib/*.png
+tests/synthetic_catalog.csv
+__pycache__/
+*.pyc
+*.egg-info/
+tttphot.egg-info/
+.DS_Store
+config/tns.yaml
+config/local.yaml

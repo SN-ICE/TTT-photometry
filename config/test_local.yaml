@@ -1,0 +1,7 @@
+# Offline validation config: calibrate against the synthetic catalogue built by
+# tests/make_synthetic_catalog.py instead of a real reference catalogue.
+calibration:
+  catalogs: [local]
+  local_catalog: tests/synthetic_catalog.csv
+  mag_range: [11.0, 19.5]
+  max_cat_err: 0.05

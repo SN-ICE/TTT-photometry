@@ -1,0 +1,15 @@
+# TEMPLATE -- do not put real credentials in this file. It IS tracked by git.
+#
+#   cp config/tns.yaml.example config/tns.yaml
+#   # then edit config/tns.yaml, which is gitignored
+#
+# config/tns.yaml is loaded automatically by every command; there is no
+# --config to pass. Create a bot at https://www.wis-tns.org/bots to get the
+# api key, the numeric id and the name.
+#
+# TNS_API_KEY, TNS_BOT_ID and TNS_BOT_NAME work as well, with this file taking
+# precedence.
+tns:
+  api_key: "PUT-YOUR-BOT-API-KEY-IN-config/tns.yaml-NOT-HERE"
+  bot_id: 0
+  bot_name: "your_bot_name"

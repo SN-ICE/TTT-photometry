@@ -1,0 +1,135 @@
+# TTT3, the 2-m telescope of the TTT facility (Teide Observatory, IAU Y68) + QHY600M CMOS camera
+#
+# Frames arrive already reduced by the observatory: bias- and flat-corrected,
+# overscan removed (3191 x 2129 effective area of a 3200 x 2140 readout), with
+# an astrometric TAN-SIP solution in the header. So there is no raw-data step
+# here, only the numbers the photometry needs.
+#
+#   3x3 binned   3191 x 2129   0.192 "/px   10.2' x 6.8'   f/6, 12 m focal length
+#
+# GAIN and RDNOISE in the header are quoted for the UNBINNED sensor (the
+# comments say so). The binned pixels are AVERAGES of the 3x3 native pixels,
+# not sums: on 2026abgb (SDSSg, 120 s) the sky is 85 ADU with a pixel-to-pixel
+# scatter of 5.8 ADU, and the averaging model predicts 5.9 ADU while summing
+# would predict 35. The effective values per binned pixel are therefore
+#
+#   gain      = GAIN x XBINNING x YBINNING       (0.44 x 9 = 3.96 e-/ADU)
+#   readnoise = RDNOISE x sqrt(XBINNING x YBINNING)   (4.74 x 3 = 14.2 e-)
+#
+# which is what 'binning_mode: average' below computes. The pipeline also
+# checks this on every frame (sky_noise_ratio in the log and the QA): measured
+# sky scatter over the scatter this gain and read noise predict. Near 1 means
+# the model is right; if a frame drifts far from 1, look here first.
+name: TTT3/QHY600
+telescope: TTT3
+site: Teide Observatory (Y68)
+
+header:
+  mjd: [MJD-OBS]
+  jd: [JD-OBS]
+  dateobs: [DATE-OBS]
+  exptime: [EXPTIME]
+  filter: [FILTER]
+  object: [OBJECT]
+  gain: [GAIN]                 # e- per ADU, UNBINNED (see above)
+  readnoise: [RDNOISE]         # e-, UNBINNED
+  saturation: [SATLEVEL]       # raw ADC ceiling; not used directly, see defaults
+  # TTT writes no target coordinates. RA/DEC are the centre of the frame, so
+  # they are only a last-resort starting point if the name cannot be resolved.
+  target_ra: []
+  target_dec: []
+  pointing_ra: [RA]            # decimal degrees
+  pointing_dec: [DEC]
+  coord_unit: deg              # deg | hourangle, for the RA cards above
+  binning_x: [XBINNING]
+  binning_y: [YBINNING]
+  n_subframes: [TOTIMA]        # frames combined into this image
+  airmass: [AIRMASS]
+  imagetype: [IMAGETYP]
+  # The observatory's own pipeline writes a zero point, limiting magnitude and
+  # seeing. They are carried into the output table (obs_zp, obs_zp_err,
+  # obs_maglim, obs_seeing_arcsec) as an independent cross-check, never used.
+  obs_zp: [ZP]
+  obs_zp_err: [EZP]
+  obs_maglim: [MAGLIM]
+  obs_seeing: [SEEING]
+
+defaults:
+  gain: 0.44                   # unbinned; header GAIN wins when present
+  readnoise: 4.74              # unbinned
+  gain_is_unbinned: true
+  binning_mode: average        # average | sum -- how the camera combined pixels
+  # A stack of TOTIMA > 1 sub-exposures. Not yet seen in this archive: 'average'
+  # assumes the frames were averaged and EXPTIME is one sub-exposure (so the
+  # gain scales by TOTIMA); 'sum' assumes EXPTIME is the total. The sky-noise
+  # check will tell you which is right on the first stacked frame.
+  stack_mode: average
+  pixel_scale: 0.064           # arcsec per UNBINNED pixel; only used without a WCS
+  # The ADC tops out at 65535; after bias (~169 ADU) and flat division a
+  # saturated pixel lands near 65000. A 3x3 average can still hide a saturated
+  # native pixel below that, so keep a margin. Calibration stars are further
+  # held below calibration.nonlinear_frac of this.
+  saturation_adu: 60000
+  # Software rebinning, applied on load. At 0.192"/px a 2.5" seeing disc is
+  # 13 px across: nothing is gained from that sampling, and every step (PSF
+  # model, cosmic rays, kernel solve) costs four times as much as at 0.38"/px.
+  # 'auto' picks the integer factor that brings the scale closest to
+  # rebin_target_arcsec (2 for 3x3-binned frames, 5 for unbinned ones); a
+  # number forces it; 1 switches it off. Pixels are SUMMED, so fluxes stay in
+  # the camera's ADU and zero points remain comparable with the observatory's
+  # ZP card; the saturation level, read noise and WCS (SIP terms included) are
+  # rescaled to match.
+  rebin: auto
+  rebin_target_arcsec: 0.35
+  # The QHY600 writes a GPS time stamp into the first pixels of row 0 (values
+  # like 9003 and 93792). The edge margin in config/default.yaml already masks
+  # them; this makes it explicit. [y0, y1, x0, x1], half-open, native pixels.
+  bad_regions:
+    - [0, 1, 0, 64]
+
+# FILTER header value -> canonical band name. TTT writes 'SDSSg' etc.; the
+# other spellings are here so a change of convention does not silently turn
+# into an unknown band.
+filters:
+  "SDSSu": u
+  "SDSSg": g
+  "SDSSr": r
+  "SDSSi": i
+  "SDSSz": z
+  "SDSSzs": z
+  "SDSS u": u
+  "SDSS g": g
+  "SDSS r": r
+  "SDSS i": i
+  "SDSS z": z
+  "u": u
+  "g": g
+  "r": r
+  "i": i
+  "z": z
+  "JohnsonU": U
+  "JohnsonB": B
+  "JohnsonV": V
+  "JohnsonR": R
+  "JohnsonI": I
+  "U": U
+  "B": B
+  "V": V
+  "R": R
+  "I": I
+  "Clear": C
+  "L": C
+  "Lum": C
+  "None": C
+
+systems:
+  U: vega
+  B: vega
+  V: vega
+  R: vega
+  I: vega
+  u: ab
+  g: ab
+  r: ab
+  i: ab
+  z: ab

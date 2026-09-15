@@ -1,0 +1,11 @@
+numpy>=1.24
+scipy>=1.10
+astropy>=5.3
+photutils>=1.10,<3   # 3.0 renamed the finder columns (xcentroid -> x_centroid)
+astroquery>=0.4.7
+reproject>=0.13
+matplotlib>=3.7
+pandas>=2.0
+PyYAML>=6.0
+requests>=2.28
+astroscrappy>=1.1     # cosmic ray rejection (L.A.Cosmic)

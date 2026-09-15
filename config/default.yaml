@@ -1,0 +1,351 @@
+# ---------------------------------------------------------------------------
+# tttphot default configuration
+# Every key can be overridden by a user config passed with --config, and by a
+# per-target file in targets/<NAME>.yaml (merged on top of this one).
+# ---------------------------------------------------------------------------
+
+# Fallback instrument, used when a frame's INSTRUME is not in the map below.
+instrument: ttt3_qhy600        # -> config/instruments/<name>.yaml
+
+# INSTRUME header value -> config/instruments/<name>.yaml. Each frame picks its
+# own, so an archive spanning more than one telescope or camera reduces
+# correctly in one run: gain, read noise, pixel scale and saturation follow the
+# frame, not the run. To add TTT1 or TTT2, copy ttt3_qhy600.yaml, edit the
+# numbers and add its INSTRUME value here.
+instruments:
+  QHY600-TTT3: ttt3_qhy600
+
+# Transient Name Server credentials, for looking a target name up. Get a bot at
+# https://www.wis-tns.org/bots . Leave these null and export TNS_API_KEY,
+# TNS_BOT_ID and TNS_BOT_NAME instead if you would rather not keep a key in a
+# file; without either, name resolution falls back to SIMBAD.
+tns:
+  api_key: null
+  bot_id: null
+  bot_name: null
+
+target:
+  # Set ra/dec in targets/<NAME>.yaml for proper forced photometry. If they are
+  # missing, the pipeline looks the name up (TNS first, then SIMBAD) and writes
+  # the answer into the target file, so it only ever has to be done once.
+  ra: null
+  dec: null
+  resolve: auto                # auto (only when ra/dec are unset) | always | off
+  resolve_sources: [tns, simbad]
+  resolve_write: true          # record the resolved position in targets/<NAME>.yaml
+  refine: auto                 # auto (only when ra/dec are unset) | always | off
+  refine_radius_arcsec: 3.0    # reject a refinement that wants to move further
+
+paths:
+  # Where the TTT frames live. A sub-directory named after the target
+  # (<data_root>/SN2026abgb/ or <data_root>/2026abgb/) is used if it exists;
+  # otherwise every FITS file anywhere below data_root whose OBJECT header
+  # names the target is picked up, so frames can just be dropped in here.
+  # The pipeline's own directory is always skipped. Override on the command
+  # line with --data-root, or edit this line.
+  data_root: ~/Desktop/TTT
+  work_root: runs              # outputs go to <work_root>/<TARGET>/
+  cache_root: cache            # reference catalogues + template images
+
+# ------------------------------ astrometry ---------------------------------
+# TTT headers carry a TAN-SIP solution from the observatory pipeline. Re-fitting
+# it against Gaia matters because every aperture, PSF fit and difference stamp
+# is placed through the WCS. 'shift' keeps the header's SIP distortion and only
+# re-centres it; 'linear' would throw the distortion away (about 1 px at the
+# corners of a TTT3 frame); 'sip' refits it, which needs plenty of stars.
+# A refit is only accepted if it lowers the residual.
+astrometry:
+  mode: shift                  # off | shift | linear | sip
+  catalog: gaia_astrometry     # Gaia DR3 positions (deeper than the GSPC subset)
+  fallback_catalogs: [gaia_synth, panstarrs, local]
+  # 'auto' = a circle just containing the frame, so it follows the camera.
+  # A number here overrides that.
+  search_radius_arcmin: auto
+  max_mag: 20.0
+  match_radius_arcsec: 3.0     # first pass, generous
+  final_match_radius_arcsec: 1.0
+  min_stars: 8
+  sip_degree: 3                # only used when mode is 'sip'
+  iterations: 2
+  sigma_clip: 3.0
+  max_shift_arcsec: 30.0       # reject a solution that moves the frame further
+  max_rms_arcsec: 2.0          # reject a solution with a worse residual than this
+
+# --------------------------- image preparation -----------------------------
+image:
+  # null means 'whatever this frame's instrument file says'. Set a number here
+  # to override every instrument.
+  saturation_adu: null
+  # Software rebinning on load. null = the instrument file's 'rebin' (auto for
+  # TTT3, which halves the 0.19"/px sampling to 0.38"/px). 1 turns it off.
+  rebin: null
+  # Ignore this border when detecting and calibrating. In arcsec so it means
+  # the same patch of sky at any binning; edge_margin_px still works if set.
+  edge_margin_arcsec: 9.0
+  # Cosmic rays: sharp few-pixel spikes no PSF could make. Detected with L.A.Cosmic (astroscrappy), which
+  # separates them from stars by Laplacian edge sharpness, not brightness.
+  cosmic_rays:
+    enabled: true
+    sigclip: 4.5             # detection threshold in sigma
+    sigfrac: 0.3             # neighbouring-pixel threshold, as a fraction of sigclip
+    objlim: 10.0             # contrast against the fine-structure image; higher spares stars
+    iterations: 4
+    dilate: 1                # grow the mask by this many pixels
+    protect_nsigma: 5.0      # bright pixels shielded from flagging...
+    min_star_pixels: 4       # ...but only in groups this size, so spikes stay exposed
+    max_fraction: 0.02       # flagging more than this of a frame is a misfire; skip it
+    reject_within_fwhm: 1.0  # keep PSF stars this far from any flagged pixel
+  # Mask pixels this many robust sigma BELOW the sky. Saturation bounds the
+  # frame from above only, and a bad column divided by a near-zero flat can
+  # reach huge negative values: those would otherwise land in an aperture.
+  # Far enough out that real sky is never touched; 0 disables.
+  outlier_sigma: 30.0
+  bad_value_mask: [0.0]        # pixel values treated as bad
+  pattern:
+    # Fixed detector patterns measured with 'tttphot build-pattern'. Applied
+    # only for bands that actually have a stored pattern, so this can stay on.
+    # None exist for TTT yet; build them once there are enough dithered z (and
+    # i) frames from several fields. The numbers below were tuned on TJO/MEIA2.
+    enabled: true
+    calib_root: calib
+    block: 16                  # pattern grid: one value per block x block pixels
+    smooth_blocks: 24.0        # illumination = pattern smoothed on this many blocks
+                               # (24 x 16 px ~ 380 px, well above the ~100 px fringes)
+    min_frames: 8
+    # Refuse a pattern larger than this peak-to-peak: a detector pattern is a
+    # few per cent, so more than this means one bright field dominated the
+    # median or bad pixels went unmasked, not that the detector is unusual.
+    # Refuse a pattern larger than this peak-to-peak. Every trustworthy pattern
+    # measured on this archive is at most 5.8% (z-band fringing, the largest
+    # real effect there is); anything above 8% has been a bright host galaxy
+    # surviving the median, not the detector.
+    max_amplitude: 0.08
+    min_fields: 2              # refuse a pattern measured on a single field
+    max_frames: 60
+    fit_fringe_scale: true     # fit the fringe amplitude per frame
+    max_fringe_fraction: 0.5   # refuse to remove more than this fraction of sky
+    min_flatness_gain: 1.05    # skip the fringe term unless it flattens the frame
+  background:
+    # Background2D mesh, in arcsec (box_size in px still works if set). A fixed
+    # pixel box gives very different mesh counts at different binnings, and at
+    # the coarsest the background stops being local at all.
+    box_arcsec: 46.0
+    min_cells: 12              # never fewer than this many meshes per axis
+    filter_size: 5
+    sigma_clip: 3.0
+
+# ----------------------------- source detection ----------------------------
+detection:
+  threshold_sigma: 5.0
+  fwhm_init_arcsec: 2.0        # starting guess before the real FWHM is measured
+  fwhm_min_arcsec: 0.8
+  fwhm_max_arcsec: 8.0
+  sharplo: 0.2
+  sharphi: 1.0
+  roundlo: -0.75
+  roundhi: 0.75
+  min_stars_for_fwhm: 6
+  max_stars_for_fwhm: 40
+
+# ------------------------------- photometry --------------------------------
+photometry:
+  aperture_scale: 1.2          # aperture radius = scale x FWHM
+  curve_of_growth_scales: [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0]
+  apcor_scale: 4.0             # radius (x FWHM) taken as "total" flux
+  annulus_scale: [5.0, 8.0]    # sky annulus radii (x FWHM)
+  min_apcor_stars: 5
+  isolation_scale: 3.0         # neighbour-free radius (x FWHM) for PSF/apcor stars
+  local_bkg: annulus           # annulus | global
+  empirical_errors: true       # use blank-aperture scatter as the sky-noise floor
+                               # (essential on difference images, whose noise is correlated)
+  psf:
+    enabled: true
+    oversampling: 1            # well sampled after rebinning (FWHM ~6 px); >1 destabilises the EPSF
+    smoothing_kernel: null     # 'quartic'/'quadratic' distort the EPSF here; keep null
+    fwhm_tolerance: 0.25       # reject PSF-star candidates whose own width differs by more
+    stamp_scale: 5.0           # EPSF stamp half-size (x FWHM), forced odd
+    maxiters: 6
+    min_stars: 5
+    fit_shape_scale: 1.5       # fitting box half-size (x FWHM)
+    recentre: true             # let the SN centroid float (within recentre_max_px)
+    recentre_max_px: 2.0
+
+# ---------------------------- flux calibration -----------------------------
+calibration:
+  catalogs: [gaia_synth, panstarrs, apass]   # tried in order, per band
+  search_radius_arcmin: auto     # as above: sized to the frame being calibrated
+  match_radius_arcsec: 1.5
+  min_snr: 20.0
+  # A CCD stops being linear below saturation; a calibration star whose peak
+  # is above this fraction of full well is dropped. Never applied to the target.
+  nonlinear_frac: 0.85
+  # Drop catalogue stars that SIMBAD classifies as variable. With three to
+  # seven usable stars on a sparse field, one Mira moves the zero point.
+  screen_variables: true
+  # Limiting magnitude by injecting the frame's own PSF around the target and
+  # bisecting to the magnitude recovered half the time. Slower than the
+  # blank-aperture estimate but measures the depth on the host the transient
+  # actually sits on, which is where the analytic number is worst.
+  injection:
+    enabled: true
+    n_sites: 40
+    min_sites: 12
+    snr: 3.0                 # what counts as a recovery
+    completeness: 0.5        # the limit is the 50 per cent recovery point
+    min_radius_fwhm: 2.0     # annulus around the target: close enough to share
+    max_radius_fwhm: 6.0     # its background, far enough not to sit on it
+    step_mag: 0.5
+    max_steps: 14
+    bisect_steps: 6
+    min_for_error_scale: 20  # recoveries needed before judging the error bars
+  variable_match_arcsec: 2.0
+  min_stars: 5
+  # If the strict cuts leave fewer than min_stars, the catalogue-error, SNR and
+  # matching cuts are loosened in steps and retried; only if that still falls
+  # short is a zero point accepted from as few as min_stars_floor, without a
+  # colour term and with the uncertainty inflated for the short average. Such
+  # frames are flagged relaxed_calibration and few_cal_stars.
+  relax_when_short: true
+  min_stars_floor: 3
+  # Catalogue-error cut. A scalar applies to every provider; a mapping sets it
+  # per survey, which is what you want: Gaia synthetic photometry is good to
+  # millimagnitudes, while APASS B errors are typically 0.05-0.15, so one tight
+  # cut silently discards almost the whole of APASS.
+  max_cat_err:
+    default: 0.05
+    apass: 0.12
+  mag_range: [11.0, 19.0]
+  sigma_clip: 3.0
+  color_term: fit              # fit | fixed | none
+  color_term_max: 0.6          # |C| above this means a runaway fit; refit without it
+  color_term_fixed: {}         # e.g. {g: 0.03, r: -0.02}  (mag per mag of colour)
+  color_pivot: {B: 0.65, V: 0.65, g: 0.45, r: 0.35, i: 0.30, z: 0.30}
+  zp_error_floor: 0.01
+  max_rms: 0.25
+  # Recovering a failed zero point from another band of the same night.
+  transfer_zeropoints: true
+  transfer_min_nights: 3       # nights both bands must share to trust an offset
+  transfer_max_scatter: 0.25   # reject an offset noisier than this (mag)
+  transfer_error_floor: 0.03   # systematic floor on a transferred zero point                # above this the frame is flagged poor_calibration
+  limiting_sigma: 3.0
+
+# ---------------------------- template subtraction -------------------------
+subtraction:
+  enabled: true
+  # Reference image source per band. Tried in order until one succeeds.
+  #   file       : explicit path, set in the target file
+  #   ttt_stack  : stack of this target's own TTT epochs (see ttt_stack below)
+  #   panstarrs  : PS1 DR2 stacked cutout downloaded from MAST (g,r,i,z,y only)
+  reference_sources:
+    u: [file, hips, ttt_stack]
+    B: [file, hips, ttt_stack]
+    V: [file, hips, ttt_stack]
+    R: [file, panstarrs, hips, ttt_stack]
+    I: [file, panstarrs, hips, ttt_stack]
+    g: [file, panstarrs, hips, ttt_stack]
+    r: [file, panstarrs, hips, ttt_stack]
+    i: [file, panstarrs, hips, ttt_stack]
+    z: [file, panstarrs, hips, ttt_stack]
+    # Johnson R and I are separate keys from SDSS r and i: YAML is case
+    # sensitive and they are different filters. 'default' catches any band not
+    # listed -- a narrow band such as H alpha, say -- so an unlisted filter
+    # falls back to your own frames instead of quietly finding nothing.
+    default: [file, ttt_stack]
+
+  # Which public survey to render for each band, through the CDS hips2fits
+  # service. Give a HiPS id ("CDS/P/DSS2/blue") or one of the shorthands in
+  # templates.HIPS_ALIASES: dss2-blue, dss2-red, sdss9-u/g/r/i/z, ps1-g/r/i/z/y.
+  # pixel_scale is optional and defaults to the survey's native resolution.
+  #
+  # B and V have no all-sky CCD survey of their own. DSS2 blue and red are the
+  # closest wide-field matches in bandpass -- but they are photographic, so
+  # their response is not proportional to flux, and one kernel scaling cannot
+  # match a non-linear plate to a linear CCD frame across a bright galaxy.
+  # Where a deep linear survey exists, borrowing it through
+  # subtraction.reference_band usually subtracts better despite the bandpass
+  # mismatch. 'tttphot fetch-template --compare' measures which wins on your
+  # own field instead of guessing.
+  hips:
+    u: {survey: sdss9-u}         # SDSS footprint only; elsewhere it finds nothing
+    B: {survey: dss2-blue}
+    V: {survey: dss2-red}
+    R: {survey: dss2-red}
+    I: {survey: dss2-nir}
+  hips_max_pixels: 4000
+  panstarrs:
+    size_arcmin: null          # cutout to request; default is 1.25 x cutout_arcmin
+    max_size_px: 3200          # PS1 pixels are 0.25", so this caps a request at ~13'
+    timeout_s: 600.0
+    mosaic: true               # fetch neighbouring skycells to fill the tile edges
+  # A band with no survey template of its own (B, V) can borrow another filter's,
+  # e.g. {B: g, V: r}. Off by default: the kernel absorbs the overall flux ratio,
+  # but a colour gradient across the host leaves structured residuals, so this is
+  # a judgement call about your host, not a free lunch. Epochs measured this way
+  # are flagged 'cross_band_template'.
+  # Borrow another filter's survey template. Pan-STARRS has only grizy, so
+  # Johnson R and I need one: R and PS1 r are a close bandpass match, and
+  # Johnson I sits between PS1 i and z. Those epochs come out flagged
+  # cross_band_template. Whether the borrowed PS1 stack beats the
+  # photographic DSS2 plate in the nominally right filter is a question
+  # about your field, not an argument to have:
+  #   tttphot fetch-template <name> --compare --bands I
+  reference_band: {R: r, I: i}
+  convolve_science_ratio: 1.25 # convolve the science frame only when the reference
+                               # seeing is this much worse; a survey stack is
+                               # normally sharper than TTT, so this rarely fires
+  # size of the working stamp around the SN. 'auto' = 3/4 of the frame width,
+  # clamped to 4-12 arcmin (7' on a 10.2' x 6.8' TTT3 frame).
+  cutout_arcmin: auto
+                               # (bigger = more stars for the kernel and the PSF)
+  max_chi2: 2.5                # above this the difference is flagged as unreliable
+  # Every epoch of a band against the same reference should get roughly the
+  # same kernel sum (the flux scaling reference -> science). One that lands a
+  # factor of this away has not found a different scaling, it has failed to
+  # find one, and its flux means nothing.
+  check_kernel_sum: true
+  kernel_sum_tolerance: 3.0
+  # The chi2 above is measured on the bright stars the kernel was fitted to, so
+  # it reports that the PSF match worked there -- not that the subtraction is
+  # clean on the host. This judges the shape of what is left behind instead. A
+  # flux mismatch leaves a one-signed blob; a registration error leaves a
+  # dipole, which no rescaling can remove.
+  quality:
+    enabled: true
+    dipole_nsigma: 5.0         # both lobes must exceed this
+    dipole_antisymmetry: 0.3   # weaker lobe over stronger, so a detection is not a dipole
+    min_sources: 8             # below this there is nothing to judge on
+    dipole_warn: 0.15          # this fraction of sources dipolar...
+    dipole_fail: 0.30          # ...-> fail, flagged as a bad subtraction
+    alignment_warn: 0.45       # ...but only if the dipoles point the same way.
+                               # A shift displaces every source identically, so real
+                               # dipoles align; noise near bright stars does not.
+  ttt_stack:
+    mjd_min: null              # epochs used to build the target's own template
+    mjd_max: null
+    exclude_science: true      # never let an epoch be its own template
+    min_images: 2
+    combine: median
+  kernel:
+    gauss_sigmas_px: [0.7, 1.5, 3.0]
+    gauss_degrees: [4, 2, 0]   # polynomial modifier degree per Gaussian
+    half_size_px: 9            # kernel half-width
+    # The pixel sizes here were tuned for a ~5 px FWHM. With scale_with_fwhm
+    # the kernel, its Gaussians and the fitting stamps grow in proportion on
+    # frames with a wider PSF in pixels (bad seeing, or rebin switched off).
+    scale_with_fwhm: true
+    tuned_fwhm_px: 5.0
+    spatial_order: 0           # 0 = spatially constant kernel over the stamp
+    background_order: 1        # differential background polynomial order
+    n_stamps: 40               # bright stars used to solve for the kernel
+    stamp_half_px: 20
+    sigma_clip: 3.0
+    max_iter: 3
+
+# ------------------------------- outputs -----------------------------------
+output:
+  primary_method: auto         # auto | difference_psf | psf | aperture
+  write_diagnostics: true
+  write_qa_plots: true
+  write_stamps: true
+  stamp_arcsec: 60.0
+  overwrite: false

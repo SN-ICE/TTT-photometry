@@ -1,0 +1,18 @@
+#!/bin/sh
+# Refuse to commit credentials that belong in the gitignored config/tns.yaml.
+# Enable once with:  git config core.hooksPath .githooks
+fail=0
+for f in $(git diff --cached --name-only --diff-filter=ACM); do
+    case "$f" in
+        config/tns.yaml.example)
+            if git show ":$f" | grep -Eq 'api_key:[[:space:]]*"?[A-Za-z0-9]{20,}'; then
+                echo "pre-commit: $f looks like it holds a real API key." >&2
+                echo "            Put credentials in config/tns.yaml (gitignored) instead." >&2
+                fail=1
+            fi ;;
+        config/tns.yaml|config/local.yaml)
+            echo "pre-commit: $f must not be committed." >&2
+            fail=1 ;;
+    esac
+done
+exit $fail

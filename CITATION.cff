@@ -1,0 +1,15 @@
+cff-version: 1.2.0
+title: "tttphot: a supernova photometry pipeline for the TTT telescopes at Teide Observatory"
+message: "If this software contributes to a publication, please cite it."
+type: software
+authors:
+  - family-names: Galbany
+    given-names: Lluís
+    affiliation: "Institute of Space Sciences (ICE-CSIC), Barcelona"
+license: BSD-3-Clause
+repository-code: "https://github.com/SN-ICE/TTT-photometry"
+keywords:
+  - supernovae
+  - photometry
+  - difference imaging
+  - astronomy

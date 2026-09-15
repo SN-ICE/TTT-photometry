@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tttphot"
+version = "0.1.0"
+description = "Photometry pipeline for TTT (Teide Observatory) transient imaging, adapted from tjophot"
+readme = "README.md"
+license = {text = "BSD-3-Clause"}
+authors = [{name = "Lluis Galbany"}]
+urls = {Repository = "https://github.com/SN-ICE/TTT-photometry", Origin = "https://github.com/SN-ICE/TJO-photometry"}
+requires-python = ">=3.9"
+dependencies = [
+    "numpy>=1.24", "scipy>=1.10", "astropy>=5.3", "photutils>=1.10,<3",
+    "astroquery>=0.4.7", "reproject>=0.13", "matplotlib>=3.7",
+    "pandas>=2.0", "PyYAML>=6.0", "requests>=2.28",
+]
+
+[project.scripts]
+tttphot = "tttphot.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["tttphot*"]

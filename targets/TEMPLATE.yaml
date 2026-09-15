@@ -1,0 +1,67 @@
+# Copy this to targets/<NAME>.yaml and edit the name. Everything else has a
+# working default -- delete any block you do not need.
+#
+#   cp targets/TEMPLATE.yaml targets/SN2027xyz.yaml
+#
+target:
+  name: SN2027xyz
+  # Leave ra/dec out and the pipeline resolves the name on TNS (then SIMBAD)
+  # and writes the answer back into this file, with a comment saying where it
+  # came from. To set them by hand, either form works:
+  #   ra: 183.0531491        dec: 13.2217510
+  #   ra: "12:12:12.79"      dec: "+13:13:18.2"
+
+subtraction:
+  enabled: true
+
+  # Where to look for a reference image, per band, best first.
+  #   file       -> subtraction.reference_files below (your own template)
+  #   panstarrs  -> PS1 DR2 stacks; griz only, and only at Dec > -30
+  #   hips       -> any HiPS survey via the CDS cutout service; all-sky
+  #   ttt_stack  -> stack your own late-time frames (only once the SN is gone)
+  reference_sources:
+    B: [file, hips, panstarrs, ttt_stack]
+    V: [file, hips, panstarrs, ttt_stack]
+    R: [file, panstarrs, hips, ttt_stack]
+    I: [file, panstarrs, hips, ttt_stack]
+    g: [file, panstarrs, ttt_stack]
+    r: [file, panstarrs, ttt_stack]
+    i: [file, panstarrs, ttt_stack]
+    z: [file, panstarrs, ttt_stack]
+    default: [file, ttt_stack]
+
+  # B and V have no Pan-STARRS counterpart. DSS2 is the closest wide-field
+  # match but it is photographic, so check it against the cross-band fallback
+  # on this particular field:
+  #   tttphot fetch-template <NAME> --compare --bands B V
+  hips:
+    B: {survey: dss2-blue}
+    V: {survey: dss2-red}
+    R: {survey: dss2-red}
+    I: {survey: dss2-nir}
+
+  # Fallback if the HiPS cutout loses: borrow the nearest PS1 filter instead.
+  # Those epochs come out flagged 'cross_band_template'.
+  reference_band:
+    B: g
+    V: r
+    R: r
+    I: i
+
+  # Your own templates win over everything -- 'file' is first in every list.
+  # reference_files:
+  #   B: ~/Desktop/TTT/refs/SN2027xyz_ref_B.fits
+  #   V: ~/Desktop/TTT/refs/SN2027xyz_ref_V.fits
+
+  # Or stack your own late-time frames. Only open this window once the SN has
+  # truly faded: a template containing the supernova subtracts away the signal
+  # itself, and nothing downstream can recover it.
+  # ttt_stack:
+  #   mjd_min: 61400.0
+  #   mjd_max: null
+  #   max_images: 6
+  #   min_images: 2
+
+# Southern field (Dec < -30), or anywhere Pan-STARRS does not reach: drop
+# panstarrs from reference_sources and give every band a HiPS survey, e.g.
+# SkyMapper or DECaLS. Browse ids at https://aladin.cds.unistra.fr/hips/list
