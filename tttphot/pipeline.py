@@ -417,10 +417,19 @@ def build_references(cfg, index: Sequence[EpochIndex], instrument: dict, coord: 
                     selection = selection[:max_images]
                 for entry in selection:
                     try:
-                        siblings.append(prepare_image(
+                        sibling = prepare_image(
                             entry.path, cfg, instrument,
                             pattern=pattern_for(patterns, band, entry.detector),
-                            astrometry_ref=astrometry_ref))
+                            astrometry_ref=astrometry_ref)
+                        # Every epoch of the stack is held at once. The stack
+                        # reads the pixels, the mask, the background model and
+                        # the WCS; the error map, the background RMS and the
+                        # cosmic-ray mask are three more full-frame arrays per
+                        # epoch that nothing downstream of here looks at.
+                        sibling.error = None
+                        sibling.bkg_rms = None
+                        sibling.crmask = None
+                        siblings.append(sibling)
                     except Exception as exc:
                         log.warning("template epoch %s failed: %s", entry.path.name, exc)
 
@@ -538,7 +547,7 @@ def process_image(image: ScienceImage, cfg, coord: SkyCoord, cache_root: Path,
     rows.append(_photometry_row(common, "aperture", float(tab["flux"][0]),
                                 aper_err, zp, apcor.apcor_mag,
                                 image, x=sn_xy[0], y=sn_xy[1],
-                                flags=int(tab["flags"][0]), limit=limit))
+                                flags=int(tab["flags"][0]), limit=limit, cfg=cfg))
 
     epsf, n_psf = ph.build_epsf(image, psf_stars, fwhm, cfg)
 
@@ -576,7 +585,7 @@ def process_image(image: ScienceImage, cfg, coord: SkyCoord, cache_root: Path,
                                         psf_err, zp, psf_corr, image,
                                         x=float(fit["x"][0]), y=float(fit["y"][0]),
                                         dx=float(fit["dx"][0]), dy=float(fit["dy"][0]),
-                                        flags=int(tab["flags"][0]), limit=limit))
+                                        flags=int(tab["flags"][0]), limit=limit, cfg=cfg))
 
     # ------------------------------------------------------------ difference
     diff = None
@@ -721,7 +730,7 @@ def _difference_rows(diff, image, cfg, coord, common, zp, limit,
                                 diff_err / scale, zp, apcor_mag, image,
                                 x=sn_xy[0], y=sn_xy[1],
                                 flags=int(tab["flags"][0]) | bad_subtraction | science_flags,
-                                limit=limit, flux_err_sys=host_sys / scale))
+                                limit=limit, flux_err_sys=host_sys / scale, cfg=cfg))
 
     if not bool(cfg.get("photometry.psf.enabled", True)):
         return rows
@@ -750,7 +759,7 @@ def _difference_rows(diff, image, cfg, coord, common, zp, limit,
                                         image, x=float(fit["x"][0]), y=float(fit["y"][0]),
                                         dx=float(fit["dx"][0]), dy=float(fit["dy"][0]),
                                         flags=int(tab["flags"][0]) | bad_subtraction | science_flags,
-                                        limit=limit, flux_err_sys=psf_sys / scale))
+                                        limit=limit, flux_err_sys=psf_sys / scale, cfg=cfg))
     return rows
 
 
@@ -810,7 +819,7 @@ class _MatchedImage(_StampBase):
 def _photometry_row(common: dict, method: str, flux: float, flux_err: float,
                     zp: ZeroPoint, apcor_mag: float, image, x=np.nan, y=np.nan,
                     dx=np.nan, dy=np.nan, flags: int = 0, limit: float = np.nan,
-                    flux_err_sys: float = 0.0) -> dict:
+                    flux_err_sys: float = 0.0, cfg=None) -> dict:
     """Turn a flux measurement into a calibrated row.
 
     *flux_err* is the statistical error and alone sets the SNR, hence whether
@@ -821,11 +830,12 @@ def _photometry_row(common: dict, method: str, flux: float, flux_err: float,
     flags = int(flags) | int(common.pop("flags_base", 0))
     exptime = max(image.meta.exptime, 1e-6)
     snr = flux / flux_err if (np.isfinite(flux_err) and flux_err > 0) else np.nan
+    detection_snr = float(cfg.get("output.detection_snr", 3.0)) if cfg is not None else 3.0
 
     mag = np.nan
     mag_err = np.nan
     is_limit = True
-    if zp.ok and np.isfinite(flux) and flux > 0 and np.isfinite(snr) and snr >= 3.0:
+    if zp.ok and np.isfinite(flux) and flux > 0 and np.isfinite(snr) and snr >= detection_snr:
         inst = -2.5 * np.log10(flux / exptime) + apcor_mag
         mag = inst + zp.zp
         sys = flux_err_sys if np.isfinite(flux_err_sys) else 0.0

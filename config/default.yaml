@@ -393,6 +393,10 @@ subtraction:
 # ------------------------------- outputs -----------------------------------
 output:
   primary_method: auto         # auto | difference_psf | psf | aperture
+  # Signal-to-noise at which a measurement becomes a detection rather than an
+  # upper limit. Read by the main path and by the zero-point transfer, which
+  # each used to carry their own hard-coded 3.0.
+  detection_snr: 3.0
   # When every difference measurement of an epoch is flagged and the fallback
   # would be direct photometry, keep the (flagged) difference instead if the
   # direct value is brighter than it by more than this: 0.2 mag means the host

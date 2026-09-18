@@ -79,7 +79,11 @@ def from_file(path, band: str) -> ReferenceImage:
     path = Path(path).expanduser()
     with fits.open(path, memmap=False) as hdul:
         hdu = next((h for h in hdul if getattr(h, "data", None) is not None), hdul[0])
-        data = np.asarray(hdu.data, dtype=float)
+        # float32: one reference per band stays resident for the whole run, and
+        # a 3200 x 3200 PS1 cutout is 82 MB as float64 against 41 as float32 --
+        # which is the precision it is cached at anyway. Everything that does
+        # arithmetic on it (reprojection, the kernel solve) promotes to float64.
+        data = np.asarray(hdu.data, dtype=np.float32)
         header = hdu.header.copy()
     wcs = WCS(header).celestial
     scale = float(np.mean(proj_plane_pixel_scales(wcs)) * 3600.0)
@@ -201,7 +205,8 @@ def build_ttt_stack(images: Sequence, cfg, coord: SkyCoord, band: str,
     scale = float(np.mean(proj_plane_pixel_scales(target_wcs)) * 3600.0)
     log.info("reference for %s: TTT stack of %d epochs (MJD %.2f-%.2f)", band, len(chosen),
              header["MJDMIN"], header["MJDMAX"])
-    return ReferenceImage(stack, target_wcs, band, "ttt_stack", scale, source_band=band,
+    return ReferenceImage(stack.astype(np.float32, copy=False), target_wcs, band,
+                          "ttt_stack", scale, source_band=band,
                           header=header, mask=mask, n_images=len(chosen),
                           mjd_range=(header["MJDMIN"], header["MJDMAX"]), path=cache_key)
 
@@ -369,8 +374,8 @@ def fetch_hips_cutout(coord: SkyCoord, band: str, survey: str, size_arcmin: floa
     scale = float(np.mean(proj_plane_pixel_scales(wcs)) * 3600.0)
     log.info("reference for %s: %s (%d px, %.3f\"/px, %.0f%% valid)",
              band, survey, size_px, scale, 100 * np.isfinite(data).mean())
-    return ReferenceImage(data, wcs, band, "hips", scale, source_band=survey,
-                          header=header, path=cache)
+    return ReferenceImage(data.astype(np.float32, copy=False), wcs, band, "hips", scale,
+                          source_band=survey, header=header, path=cache)
 
 
 _PS1_SCALE = 0.25          # arcsec/px
@@ -582,8 +587,8 @@ def fetch_panstarrs_cutout(coord: SkyCoord, band: str, size_arcmin: float,
 
     wcs = WCS(header).celestial
     log.info("reference for %s: PS1 stack cutout (%d px)", band, size_px)
-    return ReferenceImage(data, wcs, band, "panstarrs", _PS1_SCALE, source_band=band,
-                          header=header, path=cache)
+    return ReferenceImage(data.astype(np.float32, copy=False), wcs, band, "panstarrs",
+                          _PS1_SCALE, source_band=band, header=header, path=cache)
 
 
 def linearise_ps1(data: np.ndarray, header: fits.Header) -> np.ndarray:

@@ -31,13 +31,36 @@ class ApCorResult:
 # --------------------------------------------------------------------------
 # aperture photometry
 # --------------------------------------------------------------------------
+def annulus_background(image, positions: Sequence[tuple[float, float]],
+                       annulus_px: tuple[float, float], sigma: float = 3.0,
+                       maxiters: int = 10) -> tuple:
+    """Sigma-clipped sky in an annulus around each position.
+
+    Returns ``(median per pixel, standard deviation, number of pixels)``, one
+    entry per position. Split out of :func:`measure_apertures` so that a caller
+    measuring the same positions at several radii can pay for the clipping once
+    instead of once per radius -- the curve of growth does eleven radii on up to
+    forty stars, and the annulus is the same every time.
+    """
+    positions = np.atleast_2d(np.asarray(positions, dtype=float))
+    annulus = CircularAnnulus(positions, r_in=float(annulus_px[0]), r_out=float(annulus_px[1]))
+    stats = ApertureStats(image.data, annulus, mask=image.mask,
+                          sigma_clip=SigmaClip(sigma=sigma, maxiters=maxiters))
+    return (np.atleast_1d(np.asarray(stats.median, dtype=float)),
+            np.atleast_1d(np.asarray(stats.std, dtype=float)),
+            np.atleast_1d(np.asarray(stats.sum_aper_area.value, dtype=float)))
+
+
 def measure_apertures(image, positions: Sequence[tuple[float, float]], radius_px: float,
                       cfg, annulus_px: Optional[tuple[float, float]] = None,
-                      local_bkg: bool = True) -> Table:
+                      local_bkg: bool = True, background: Optional[tuple] = None) -> Table:
     """Circular-aperture photometry with a sigma-clipped annulus background.
 
     Returns a table with ``flux`` (background-subtracted counts in the
     aperture), ``flux_err``, ``local_bkg``, ``npix`` and quality flags.
+
+    *background* is an already-measured ``annulus_background`` result for these
+    same positions, for callers that would otherwise recompute an identical one.
     """
     positions = np.atleast_2d(np.asarray(positions, dtype=float))
     if image.error is None:
@@ -45,13 +68,15 @@ def measure_apertures(image, positions: Sequence[tuple[float, float]], radius_px
 
     aperture = CircularAperture(positions, r=float(radius_px))
 
+    # photometry.local_bkg: 'annulus' (the default) or 'global', which uses the
+    # 2D background model instead. The key was documented but never read.
+    if str(cfg.get("photometry.local_bkg", "annulus")).strip().lower() == "global":
+        local_bkg = False
+
     if local_bkg and annulus_px is not None:
-        annulus = CircularAnnulus(positions, r_in=float(annulus_px[0]), r_out=float(annulus_px[1]))
-        stats = ApertureStats(image.data, annulus, mask=image.mask,
-                              sigma_clip=SigmaClip(sigma=3.0, maxiters=10))
-        bkg_per_pix = np.atleast_1d(np.asarray(stats.median, dtype=float))
-        bkg_std = np.atleast_1d(np.asarray(stats.std, dtype=float))
-        n_bkg = np.atleast_1d(np.asarray(stats.sum_aper_area.value, dtype=float))
+        if background is None:
+            background = annulus_background(image, positions, annulus_px)
+        bkg_per_pix, bkg_std, n_bkg = background
         data = image.data
     else:
         # Use the global 2D background model instead of a local annulus.
@@ -133,8 +158,12 @@ def curve_of_growth(image, stars: Table, fwhm_px: float, cfg) -> ApCorResult:
 
     fluxes = np.full((len(positions), radii.size), np.nan)
     flags = np.zeros(len(positions), dtype=int)
+    # The annulus does not depend on the aperture radius, so measure the sky
+    # once rather than sigma-clipping the same pixels for all eleven radii.
+    background = annulus_background(image, positions, annulus)
     for j, radius in enumerate(radii):
-        tab = measure_apertures(image, positions, radius, cfg, annulus_px=annulus)
+        tab = measure_apertures(image, positions, radius, cfg, annulus_px=annulus,
+                                background=background)
         fluxes[:, j] = np.asarray(tab["flux"], dtype=float)
         flags |= np.asarray(tab["flags"], dtype=int)
 
@@ -288,7 +317,7 @@ def limiting_magnitude(image, fwhm_px: float, zp: float, cfg,
 
 
 def empirical_limit(image, fwhm_px: float, zp: float, cfg, apcor_mag: float = 0.0,
-                    n_apertures: int = 300, sigma: Optional[float] = None,
+                    n_apertures: int = 1200, sigma: Optional[float] = None,
                     rng_seed: int = 12345) -> float:
     """Limiting magnitude from the scatter of blank-sky apertures.
 
@@ -302,8 +331,10 @@ def empirical_limit(image, fwhm_px: float, zp: float, cfg, apcor_mag: float = 0.
     margin = int(np.ceil(radius)) + edge_margin_px(cfg, image.meta.pixel_scale)
     rng = np.random.default_rng(rng_seed)
 
-    xs = rng.uniform(margin, nx - margin, size=n_apertures * 4)
-    ys = rng.uniform(margin, ny - margin, size=n_apertures * 4)
+    # n_apertures is the number placed. It used to be multiplied by four here
+    # and every one of them used, so the parameter said 300 and meant 1200.
+    xs = rng.uniform(margin, nx - margin, size=n_apertures)
+    ys = rng.uniform(margin, ny - margin, size=n_apertures)
     positions = np.column_stack([xs, ys])
     apertures = CircularAperture(positions, r=radius)
     phot = aperture_photometry(image.data_sub, apertures, mask=image.mask)

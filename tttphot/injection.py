@@ -121,6 +121,14 @@ def measure_limit(image, epsf, fwhm_px: float, zp: float, cfg,
     exptime = max(float(image.meta.exptime), 1e-6)
     truth: list[tuple[float, float, float]] = []
 
+    # The sky annulus starts 5 FWHM from the site, where the injected PSF has
+    # essentially no flux, so it is measured once on the clean frame and reused
+    # for every site at every magnitude. A single frame makes some 800
+    # measurements here (40 sites x up to 21 magnitudes), and each one was
+    # sigma-clipping its own annulus. Measuring it before the injection is also
+    # the more honest sky: the real background does not contain the fake source.
+    site_background = ph.annulus_background(image, sites, annulus)
+
     def recovered_fraction(mag: float) -> float:
         """Inject one source per site at *mag*, measure it back, count the wins."""
         flux = 10.0 ** (-0.4 * (mag - zp - apcor_mag)) * exptime
@@ -128,7 +136,7 @@ def measure_limit(image, epsf, fwhm_px: float, zp: float, cfg,
             return 0.0
         hits = 0
         half = int(np.ceil(3.0 * fwhm_px))
-        for (x, y) in sites:
+        for k, (x, y) in enumerate(sites):
             x0, x1 = int(x) - half, int(x) + half + 1
             y0, y1 = int(y) - half, int(y) + half + 1
             patch = image.data[y0:y1, x0:x1]
@@ -137,9 +145,10 @@ def measure_limit(image, epsf, fwhm_px: float, zp: float, cfg,
             model = _render(epsf, patch.shape, x - x0, y - y0, flux)
             saved = patch.copy()
             image.data[y0:y1, x0:x1] = patch + model
+            here = tuple(values[k:k + 1] for values in site_background)
             try:
                 tab = ph.measure_apertures(image, [(x, y)], radius, cfg,
-                                           annulus_px=annulus)
+                                           annulus_px=annulus, background=here)
                 f = float(tab["flux"][0])
                 e = float(tab["flux_err"][0])
             finally:

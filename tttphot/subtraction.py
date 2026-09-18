@@ -174,16 +174,13 @@ def solve_kernel(science: np.ndarray, reference: np.ndarray, mask: np.ndarray,
     basis = gaussian_basis(half, sigmas, degrees)
     spatial = _polynomial_terms(science.shape, spatial_order)
     bkg_terms = _polynomial_terms(science.shape, bkg_order)
+    n_kernel_columns = len(basis) * len(spatial)
+    n_columns = n_kernel_columns + len(bkg_terms)
+    # With a spatially constant kernel the single spatial term is all ones, so
+    # multiplying by it only makes a copy.
+    unit_spatial = spatial_order == 0 and len(spatial) == 1
 
     ref = np.nan_to_num(reference, nan=0.0, posinf=0.0, neginf=0.0)
-    convolved = [fftconvolve(ref, b, mode="same") for b in basis]
-
-    columns: list[np.ndarray] = []
-    for conv in convolved:
-        for poly in spatial:
-            columns.append(conv * poly)
-    n_kernel_columns = len(columns)
-    columns.extend(bkg_terms)
 
     # The transient must never inform the kernel. It is in the science frame and
     # not in the reference, so a stamp on it asks the kernel to conjure its flux
@@ -225,27 +222,45 @@ def solve_kernel(science: np.ndarray, reference: np.ndarray, mask: np.ndarray,
     fit_mask[:, :half + 1] = False
     fit_mask[:, -half - 1:] = False
 
-    if fit_mask.sum() < 10 * len(columns):
-        raise RuntimeError(f"too few pixels ({int(fit_mask.sum())}) to solve for the kernel")
+    fit_index = np.flatnonzero(fit_mask)
+    if fit_index.size < 10 * n_columns:
+        raise RuntimeError(f"too few pixels ({int(fit_index.size)}) to solve for the kernel")
 
-    keep = fit_mask.copy()
-    coefficients = np.zeros(len(columns))
+    # The design matrix holds only the pixels that are actually fitted, and it
+    # is built one basis function at a time so that at most one convolution
+    # exists at full stamp size. Keeping every column at full size instead --
+    # 22 convolutions, 22 copies of them, and a fresh model image per iteration
+    # -- cost roughly 450 MB at the default rebinning and some 4 GB with
+    # image.rebin: 1, which is more than most laptops have to spare.
+    design = np.empty((fit_index.size, n_columns), dtype=float)
+    column = 0
+    for function in basis:
+        convolved = fftconvolve(ref, function, mode="same")
+        flat = convolved.ravel()
+        for poly in spatial:
+            design[:, column] = (flat[fit_index] if unit_spatial
+                                 else (convolved * poly).ravel()[fit_index])
+            column += 1
+        del convolved, flat
+    for term in bkg_terms:
+        design[:, column] = term.ravel()[fit_index]
+        column += 1
+    observed = science.ravel()[fit_index]
+
+    keep = np.ones(fit_index.size, dtype=bool)
+    coefficients = np.zeros(n_columns)
     rms = float("nan")
     for _ in range(max_iter):
-        design = np.column_stack([c[keep] for c in columns])
-        coefficients, *_ = np.linalg.lstsq(design, science[keep], rcond=None)
-        residual = science[keep] - design @ coefficients
-        scatter = float(np.std(residual))
+        coefficients, *_ = np.linalg.lstsq(design[keep], observed[keep], rcond=None)
+        residual = observed - design @ coefficients
+        scatter = float(np.std(residual[keep]))
         rms = scatter
         if not np.isfinite(scatter) or scatter <= 0:
             break
-        model_full = sum(c * col for c, col in zip(coefficients, columns))
-        new_keep = fit_mask & (np.abs(science - model_full) < nsigma * scatter)
-        if new_keep.sum() < 10 * len(columns) or new_keep.sum() == keep.sum():
+        new_keep = np.abs(residual) < nsigma * scatter
+        if new_keep.sum() < 10 * n_columns or new_keep.sum() == keep.sum():
             break
         keep = new_keep
-
-    model = sum(c * col for c, col in zip(coefficients, columns))
 
     # Kernel at the centre of the stamp: the spatial polynomials are built so
     # that the centre pixel has P_0 = 1 and every higher term = 0.
@@ -256,7 +271,26 @@ def solve_kernel(science: np.ndarray, reference: np.ndarray, mask: np.ndarray,
         for n, b in enumerate(basis)
     )
 
-    residual = science[keep] - model[keep]
+    # The matched image, rebuilt from the coefficients rather than carried
+    # through the fit. Convolution is linear, so with a constant kernel the
+    # whole basis expansion collapses to a single convolution by that kernel.
+    model = np.zeros(science.shape, dtype=float)
+    for coefficient, term in zip(coefficients[n_kernel_columns:], bkg_terms):
+        if coefficient:
+            model += coefficient * term
+    if unit_spatial:
+        model += fftconvolve(ref, kernel_centre, mode="same")
+    else:
+        index = 0
+        for function in basis:
+            convolved = fftconvolve(ref, function, mode="same")
+            for poly in spatial:
+                coefficient = coefficients[index]
+                index += 1
+                if coefficient:
+                    model += coefficient * (convolved * poly)
+            del convolved
+
     yk, xk = np.mgrid[:kernel_centre.shape[0], :kernel_centre.shape[1]]
     ksum = float(kernel_centre.sum())
     kc = kernel_centre.shape[0] // 2
@@ -267,7 +301,7 @@ def solve_kernel(science: np.ndarray, reference: np.ndarray, mask: np.ndarray,
         "n_stamps": len(picks),
         "n_pixels": int(keep.sum()),
         "n_basis": len(basis),
-        "n_columns": len(columns),
+        "n_columns": n_columns,
         "spatial_order": spatial_order,
         "resid_rms": rms,
         "kernel_sum": float(kernel_centre.sum()),

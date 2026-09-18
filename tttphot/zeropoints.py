@@ -196,10 +196,16 @@ def _transfer_one(frame: pd.DataFrame, cfg=None, min_nights: int = 3,
     flagged ``zp_transferred``; nothing that already had one is touched.
     """
     floor = 0.03
+    detection_snr = 3.0
+    limiting_sigma = 3.0
     if cfg is not None:
         min_nights = int(cfg.get("calibration.transfer_min_nights", min_nights))
         max_scatter = float(cfg.get("calibration.transfer_max_scatter", max_scatter))
         floor = float(cfg.get("calibration.transfer_error_floor", floor))
+        # The same threshold the main path uses, rather than a second hard-coded
+        # 3.0 that could drift away from it.
+        detection_snr = float(cfg.get("output.detection_snr", detection_snr))
+        limiting_sigma = float(cfg.get("calibration.limiting_sigma", limiting_sigma))
 
     frame = frame.copy()
     for column in ("zp_source", "mag_offset"):
@@ -249,8 +255,14 @@ def _transfer_one(frame: pd.DataFrame, cfg=None, min_nights: int = 3,
         frame.loc[index, "flags"] = (frame.loc[index, "flags"].fillna(0).astype(int)
                                      & ~lc.FLAG_NO_ZEROPOINT) | lc.FLAG_ZP_TRANSFERRED
 
-        for row_index in index:
-            row = frame.loc[row_index]
+        # One snapshot of these rows, then one assignment per column. Reading
+        # and writing them a cell at a time built a mixed-dtype Series per row
+        # and fought pandas' dtype inference on every write.
+        snapshot = frame.loc[index]
+        new = {name: list(snapshot[name]) for name in
+               ("flags", "snr", "mag", "mag_err", "is_limit", "limit_mag")}
+        for k, row_index in enumerate(index):
+            row = snapshot.loc[row_index]
             offset_mag = row.get("mag_offset", np.nan)
             if not np.isfinite(offset_mag):
                 # An older table has no record of the correction that was
@@ -261,33 +273,40 @@ def _transfer_one(frame: pd.DataFrame, cfg=None, min_nights: int = 3,
                     offset_mag = float(row.get("apcor", 0.0) or 0.0)
                 else:
                     offset_mag = 0.0
-                    frame.loc[row_index, "flags"] = int(frame.loc[row_index, "flags"]) \
-                        | lc.FLAG_APPROX_OFFSET
+                    new["flags"][k] = int(new["flags"][k]) | lc.FLAG_APPROX_OFFSET
                     report["approximate_offset"] += 1
 
             flux, flux_err = row.get("flux", np.nan), row.get("flux_err", np.nan)
             snr = flux / flux_err if (np.isfinite(flux_err) and flux_err > 0) else np.nan
-            frame.loc[row_index, "snr"] = snr
-            if np.isfinite(flux) and flux > 0 and np.isfinite(snr) and snr >= 3.0:
-                frame.loc[row_index, "mag"] = -2.5 * np.log10(flux) + offset_mag + zp
+            new["snr"][k] = snr
+            if np.isfinite(flux) and flux > 0 and np.isfinite(snr) and snr >= detection_snr:
+                new["mag"][k] = -2.5 * np.log10(flux) + offset_mag + zp
                 sys = row.get("flux_err_sys", 0.0)
                 sys = float(sys) if sys is not None and np.isfinite(sys) else 0.0
-                frame.loc[row_index, "mag_err"] = float(np.hypot(
+                new["mag_err"][k] = float(np.hypot(
                     1.0857362 * np.hypot(flux_err, sys) / flux, zp_err))
-                frame.loc[row_index, "is_limit"] = False
+                new["is_limit"][k] = False
             else:
-                frame.loc[row_index, "mag"] = np.nan
-                frame.loc[row_index, "mag_err"] = np.nan
-                frame.loc[row_index, "is_limit"] = True
+                new["mag"][k] = np.nan
+                new["mag_err"][k] = np.nan
+                new["is_limit"][k] = True
 
+            # The limit is recomputed here from the analytic sky term, because
+            # the empirical and injected limits the main path uses cannot be
+            # reproduced from the table. It moves with the new zero point, which
+            # is the part that matters; the definition differs from the rest of
+            # the column and the row says so through zp_transferred.
             sky_rms = row.get("sky_rms_adu", np.nan)
             radius = row.get("aperture_radius_px", np.nan)
             exptime = row.get("exptime", np.nan)
             if np.isfinite(sky_rms) and np.isfinite(radius) and np.isfinite(exptime):
                 noise = sky_rms * np.sqrt(np.pi * radius ** 2) / max(exptime, 1e-6)
                 if noise > 0:
-                    frame.loc[row_index, "limit_mag"] = float(
-                        -2.5 * np.log10(3.0 * noise) + offset_mag + zp)
+                    new["limit_mag"][k] = float(
+                        -2.5 * np.log10(limiting_sigma * noise) + offset_mag + zp)
+
+        for name, values in new.items():
+            frame.loc[index, name] = values
 
         report["recovered"].append({"image": str(image), "band": str(band),
                                     "from": str(other), "zp": round(float(zp), 4),
