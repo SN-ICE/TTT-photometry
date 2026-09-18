@@ -19,7 +19,6 @@ and a quoted uncertainty against a known truth, so the spread of
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 
 import numpy as np
 
@@ -78,7 +77,6 @@ def _sites(image, x0: float, y0: float, fwhm_px: float, n: int,
 
 def _render(epsf, shape, x: float, y: float, flux: float) -> np.ndarray:
     """The frame's own empirical PSF, unit flux scaled, at a sub-pixel position."""
-    from photutils.psf import PSFPhotometry  # noqa: F401  (import cost only)
     ny, nx = shape
     yy, xx = np.mgrid[0:ny, 0:nx]
     try:

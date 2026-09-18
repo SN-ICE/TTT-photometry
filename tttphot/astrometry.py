@@ -16,7 +16,6 @@ Three fit modes, in increasing freedom:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -189,21 +188,3 @@ def _fit_shift(wcs: WCS, x: np.ndarray, y: np.ndarray, ref: SkyCoord) -> WCS:
     fitted.wcs.crpix = [wcs.wcs.crpix[0] - dx, wcs.wcs.crpix[1] - dy]
     return fitted
 
-
-def internal_consistency(images, coord: SkyCoord) -> float:
-    """Scatter of one sky position's pixel coordinates across frames.
-
-    A quick way to see how consistent a set of WCS solutions is with each other
-    without any external catalogue.
-    """
-    xs, ys = [], []
-    for image in images:
-        try:
-            x, y = image.pixel_of(coord)
-            xs.append(x)
-            ys.append(y)
-        except Exception:
-            continue
-    if len(xs) < 3:
-        return float("nan")
-    return float(np.hypot(np.std(xs), np.std(ys)))

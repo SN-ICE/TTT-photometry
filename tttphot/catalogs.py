@@ -24,14 +24,14 @@ from __future__ import annotations
 import hashlib
 import warnings
 from pathlib import Path
-from typing import Mapping, Optional, Sequence
+from typing import Mapping, Optional
 
 import numpy as np
 from astropy.coordinates import SkyCoord
 from astropy.table import Table
 import astropy.units as u
 
-from .utils import UserError, ensure_dir, get_logger
+from .utils import UserError, ensure_dir, get_logger, slugify
 
 log = get_logger("tttphot.catalogs")
 
@@ -96,17 +96,20 @@ def _snap(value: float, grid: float = CACHE_GRID_DEG) -> float:
 
 
 def _cache_path(cache_root: Path, provider: str, ra: float, dec: float,
-                radius_arcmin: float) -> Path:
+                radius_arcmin: float, variant: Optional[str] = None) -> Path:
     ra, dec = _snap(ra), _snap(dec)
     key = f"{provider}_{ra:.5f}_{dec:.5f}_{radius_arcmin:.3f}"
+    if variant:
+        key += f"_{variant}"
     digest = hashlib.md5(key.encode()).hexdigest()[:8]
-    name = f"{provider}_{ra:.4f}{dec:+.4f}_r{radius_arcmin:.1f}_{digest}.ecsv"
+    tag = f"_{slugify(variant)}" if variant else ""
+    name = f"{provider}_{ra:.4f}{dec:+.4f}_r{radius_arcmin:.1f}{tag}_{digest}.ecsv"
     return ensure_dir(cache_root / "catalogs") / name
 
 
 def load_cached(cache_root: Path, provider: str, ra: float, dec: float,
-                radius_arcmin: float) -> Optional[Table]:
-    path = _cache_path(cache_root, provider, ra, dec, radius_arcmin)
+                radius_arcmin: float, variant: Optional[str] = None) -> Optional[Table]:
+    path = _cache_path(cache_root, provider, ra, dec, radius_arcmin, variant)
     if path.exists():
         try:
             table = Table.read(path, format="ascii.ecsv")
@@ -118,8 +121,8 @@ def load_cached(cache_root: Path, provider: str, ra: float, dec: float,
 
 
 def save_cache(table: Table, cache_root: Path, provider: str, ra: float, dec: float,
-               radius_arcmin: float) -> Path:
-    path = _cache_path(cache_root, provider, ra, dec, radius_arcmin)
+               radius_arcmin: float, variant: Optional[str] = None) -> Path:
+    path = _cache_path(cache_root, provider, ra, dec, radius_arcmin, variant)
     try:
         table.write(path, format="ascii.ecsv", overwrite=True)
     except Exception as exc:  # pragma: no cover
@@ -358,8 +361,16 @@ _FETCHERS = {
 
 def get_catalog(provider: str, ra: float, dec: float, radius_arcmin: float,
                 cache_root: Path, refresh: bool = False,
-                local_path: Optional[Path] = None) -> Table:
-    """Fetch (or read from cache) a reference catalogue around a position."""
+                local_path: Optional[Path] = None,
+                options: Optional[Mapping] = None) -> Table:
+    """Fetch (or read from cache) a reference catalogue around a position.
+
+    *options* are extra keyword arguments for the provider's fetcher, and any
+    that differ from its default become part of the cache key -- so raising
+    ``astrometry.max_mag`` fetches a deeper catalogue instead of quietly reusing
+    the shallow cached one, while leaving it alone still hits the existing
+    cache.
+    """
     if provider == "local":
         if local_path is None:
             raise CatalogError("provider 'local' needs calibration.local_catalog to be set")
@@ -368,16 +379,37 @@ def get_catalog(provider: str, ra: float, dec: float, radius_arcmin: float,
     if provider not in _FETCHERS:
         raise CatalogError(f"unknown catalogue provider '{provider}'")
 
+    fetcher = _FETCHERS[provider]
+    options = _non_default_options(fetcher, options)
+    variant = "_".join(f"{k}{v}" for k, v in sorted(options.items())) or None
+
     if not refresh:
-        cached = load_cached(cache_root, provider, ra, dec, radius_arcmin)
+        cached = load_cached(cache_root, provider, ra, dec, radius_arcmin, variant)
         if cached is not None:
             return cached
 
     # Query the grid point too, so the download matches what gets cached.
-    table = _FETCHERS[provider](_snap(ra), _snap(dec), radius_arcmin)
-    save_cache(table, cache_root, provider, ra, dec, radius_arcmin)
+    table = fetcher(_snap(ra), _snap(dec), radius_arcmin, **options)
+    save_cache(table, cache_root, provider, ra, dec, radius_arcmin, variant)
     log.info("%s: %d sources retrieved", provider, len(table))
     return table
+
+
+def _non_default_options(fetcher, options: Optional[Mapping]) -> dict:
+    """Keep only the options that actually change what the fetcher returns."""
+    import inspect
+
+    if not options:
+        return {}
+    defaults = inspect.signature(fetcher).parameters
+    out = {}
+    for key, value in options.items():
+        if value is None or key not in defaults:
+            continue
+        default = defaults[key].default
+        if default is inspect.Parameter.empty or float(value) != float(default):
+            out[key] = value
+    return out
 
 
 def max_error_for(cfg, provider: str) -> float:

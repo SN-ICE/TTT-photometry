@@ -130,15 +130,6 @@ def _combine(predictions: list, floor: float = 0.03) -> Optional[dict]:
             "partners": ",".join(p["band"] for p in predictions)}
 
 
-def _partner(band, night, per_night, offsets, min_nights, max_scatter):
-    """Kept for the single-partner case; returns the tightest option."""
-    options = _predictions(band, night, per_night, offsets, min_nights, max_scatter)
-    if not options:
-        return None
-    best = options[0]
-    return (best["band"], best["zp"] - 0.0, best["scatter"], 0.0, best["n"])
-
-
 def camera_of(frame: pd.DataFrame) -> pd.Series:
     """The camera each row was taken with (``QHY600-TTT3``, ``iKon936-TTT3``).
 

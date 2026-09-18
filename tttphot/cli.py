@@ -16,7 +16,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .config import Config, PIPELINE_ROOT
+from .config import Config
 from .utils import UserError, get_logger, setup_logging
 
 log = get_logger("tttphot.cli")

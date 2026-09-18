@@ -376,11 +376,12 @@ def load_astrometry_reference(cfg, coord: SkyCoord, cache_root: Path,
                                   step=1.0, rounding="up")
     local_path = cfg.resolve_path(cfg.get("calibration.local_catalog"))
 
+    options = {"max_mag": cfg.get("astrometry.max_mag")}
     for provider in providers:
         try:
             table = cat.get_catalog(provider, float(coord.ra.deg), float(coord.dec.deg),
                                     radius, cache_root, refresh=refresh,
-                                    local_path=local_path)
+                                    local_path=local_path, options=options)
             if table is not None and len(table) >= int(cfg.get("astrometry.min_stars", 8)):
                 log.info("astrometric reference: %s (%d sources)", provider, len(table))
                 return table
@@ -1105,6 +1106,7 @@ def run(cfg, target: str, bands: Optional[Sequence[str]] = None,
 
     if bool(cfg.get("output.write_qa_plots", True)):
         plots.lightcurve(outdir / f"{target}_lightcurve.png", frame, target)
+    if bool(cfg.get("output.write_diagnostics", True)):
         plots.run_diagnostics(outdir / f"{target}_diagnostics.png", frame, target)
 
     summary = {

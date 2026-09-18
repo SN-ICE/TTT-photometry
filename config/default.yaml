@@ -65,7 +65,7 @@ astrometry:
   # 'auto' = a circle just containing the frame, so it follows the camera.
   # A number here overrides that.
   search_radius_arcmin: auto
-  max_mag: 20.0
+  max_mag: 20.0                # faintest Gaia G used as an astrometric reference
   match_radius_arcsec: 3.0     # first pass, generous
   final_match_radius_arcsec: 1.0
   min_stars: 8
@@ -245,8 +245,8 @@ calibration:
   transfer_zeropoints: true
   transfer_min_nights: 3       # nights both bands must share to trust an offset
   transfer_max_scatter: 0.25   # reject an offset noisier than this (mag)
-  transfer_error_floor: 0.03   # systematic floor on a transferred zero point                # above this the frame is flagged poor_calibration
-  limiting_sigma: 3.0
+  transfer_error_floor: 0.03   # systematic floor on a transferred zero point
+  limiting_sigma: 3.0          # N for the N-sigma limiting magnitude
 
 # ---------------------------- template subtraction -------------------------
 subtraction:
@@ -405,8 +405,6 @@ output:
   # 0.6-0.7 mag too bright.) Only differences whose kernel solved qualify.
   # null switches this off.
   host_guard_mag: 0.2
-  write_diagnostics: true
-  write_qa_plots: true
-  write_stamps: true
-  stamp_arcsec: 60.0
-  overwrite: false
+  write_qa_plots: true         # the per-epoch qa/<image>.png panels and the light curve
+  write_diagnostics: true      # the campaign-wide seeing / ZP / depth figure
+  stamp_arcsec: 60.0           # size of the stamps in the per-epoch panel

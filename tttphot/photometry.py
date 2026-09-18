@@ -13,7 +13,6 @@ from photutils.aperture import (ApertureStats, CircularAnnulus, CircularAperture
                                 aperture_photometry)
 from photutils.psf import EPSFBuilder, PSFPhotometry, extract_stars
 
-from .detection import neighbour_distance
 from .utils import edge_margin_px, get_logger, odd
 
 log = get_logger("tttphot.photometry")
