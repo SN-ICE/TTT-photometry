@@ -140,15 +140,24 @@ def _partner(band, night, per_night, offsets, min_nights, max_scatter):
 
 
 def camera_of(frame: pd.DataFrame) -> pd.Series:
-    """The camera each row was taken with: the instrument part of ``detector``
-    (``QHY600-TTT3``, ``iKon936-TTT3``), without the readout geometry.
+    """The camera each row was taken with (``QHY600-TTT3``, ``iKon936-TTT3``).
 
     Band-to-band offsets are a property of one camera's filters and detector,
     and a zero point is a property of one camera's sensitivity: on SN 2026abgb
     the iKon936 zero points sit 1.4 mag above the QHY600 ones in the same band
     on the same night. Mixing cameras in one per-night median would turn the
     offsets into noise (g-i scattered by 0.62 mag across nights that way).
+
+    Read from the ``camera`` column. Tables written before that column existed
+    fall back to the instrument part of ``detector``, which is where this used
+    to get it from -- a coupling to a label format defined in another module,
+    where a cosmetic change to ``Detector.label`` would have broken per-camera
+    transfer with no error at all.
     """
+    if "camera" in frame.columns:
+        camera = frame["camera"].fillna("").astype(str)
+        if camera.str.strip().any():
+            return camera
     if "detector" not in frame.columns:
         return pd.Series("", index=frame.index)
     return frame["detector"].fillna("").astype(str).str.split().str[0].fillna("")

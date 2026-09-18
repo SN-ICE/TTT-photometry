@@ -141,9 +141,11 @@ def solve_kernel(science: np.ndarray, reference: np.ndarray, mask: np.ndarray,
     The kernel may vary over the stamp: each basis function is multiplied by a
     2D polynomial of order ``subtraction.kernel.spatial_order`` (0 = constant).
 
-    Returns ``(model, kernel_centre, background, info)`` where *model* is the
-    matched reference (background included) and *kernel_centre* is the kernel
-    evaluated at the centre of the stamp, used for noise propagation and QA.
+    Returns ``(model, kernel_centre, info)`` where *model* is the matched
+    reference (the differential-background polynomial included) and
+    *kernel_centre* is the kernel evaluated at the centre of the stamp, used for
+    noise propagation and QA. The background term used to be returned separately
+    as a fourth, full-frame array that no caller ever looked at.
     """
     half = int(cfg.get("subtraction.kernel.half_size_px", 9))
     sigmas = list(cfg.get("subtraction.kernel.gauss_sigmas_px", [0.7, 1.5, 3.0]))
@@ -244,9 +246,6 @@ def solve_kernel(science: np.ndarray, reference: np.ndarray, mask: np.ndarray,
         keep = new_keep
 
     model = sum(c * col for c, col in zip(coefficients, columns))
-    background = sum(c * t for c, t in zip(coefficients[n_kernel_columns:], bkg_terms))
-    if np.isscalar(background):
-        background = np.full(science.shape, float(background))
 
     # Kernel at the centre of the stamp: the spatial polynomials are built so
     # that the centre pixel has P_0 = 1 and every higher term = 0.
@@ -272,8 +271,9 @@ def solve_kernel(science: np.ndarray, reference: np.ndarray, mask: np.ndarray,
         "spatial_order": spatial_order,
         "resid_rms": rms,
         "kernel_sum": float(kernel_centre.sum()),
+        "background_coefficients": [float(c) for c in coefficients[n_kernel_columns:]],
     }
-    return model, kernel_centre, background, info
+    return model, kernel_centre, info
 
 
 # --------------------------------------------------------------------------
@@ -362,7 +362,7 @@ def subtract(image, reference, cfg, coord: SkyCoord,
     work_mask = mask | ~np.isfinite(science_fit) | ~np.isfinite(reference_fit)
     try:
         target_xy = tuple(float(v) for v in stamp_wcs.world_to_pixel(coord))
-        matched, kernel, background, info = solve_kernel(
+        matched, kernel, info = solve_kernel(
             np.nan_to_num(science_fit), np.nan_to_num(reference_fit), work_mask,
             fwhm_px if mode == "convolve_reference" else max(ref_fwhm, fwhm_px), cfg,
             exclude_xy=target_xy)

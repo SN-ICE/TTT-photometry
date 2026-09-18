@@ -21,7 +21,11 @@ import math
 import numpy as np
 from typing import Iterable, Optional
 
-from .utils import first_header_value, slugify
+from .utils import first_header_value, get_logger, slugify
+
+log = get_logger("tttphot.detector")
+
+_WARNED_ASYMMETRIC: set = set()
 
 
 @dataclass(frozen=True)
@@ -281,7 +285,16 @@ def identify(header, instrument_map: Optional[dict] = None,
         raw = str(instrument_map.get(raw, raw)).strip()
     ny = _int(header.get("NAXIS2"), 0)
     nx = _int(header.get("NAXIS1"), 0)
-    bx, _ = camera_binning(header, instrument)
+    bx, by = camera_binning(header, instrument)
+    if by != bx and (raw, bx, by) not in _WARNED_ASYMMETRIC:
+        # The detector token records one binning factor, so an asymmetric
+        # readout would be labelled by its x factor alone and could be merged
+        # with a different configuration in group_by_detector and in the
+        # kernel-sum grouping. No TTT frame has done this yet; say so if one does.
+        _WARNED_ASYMMETRIC.add((raw, bx, by))
+        log.warning("%s is binned %dx%d; the detector key records only %d, so two "
+                    "readouts could be grouped together. Check the pixel scale and "
+                    "the gain for these frames.", raw or "this camera", bx, by, bx)
     already = _int(header.get("TTTREBIN"), 0)
     if already:
         return Detector(instrument=raw or "unknown", ny=ny, nx=nx, binning=bx * already)
@@ -334,7 +347,12 @@ def resolve_size(value, frame_arcmin: float, fraction: float = 1.0,
         return float(default)
     if isinstance(value, str):
         if value.strip().lower() not in ("auto", "frame"):
-            return float(value)
+            try:
+                return float(value)
+            except ValueError:
+                log.warning("%r is neither a number nor 'auto'; using %.1f",
+                            value, float(default))
+                return float(default)
         size = float(frame_arcmin) * float(fraction)
         # Downloads are cached under a key that includes the size, so a size
         # that drifts with every frame would mean a fresh download per frame.

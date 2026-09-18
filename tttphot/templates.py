@@ -53,6 +53,10 @@ class ReferenceImage:
     n_images: int = 1
     mjd_range: tuple[float, float] = (float("nan"), float("nan"))
     path: Optional[Path] = None
+    # Set by register_reference when the WCS is re-tied to the astrometric
+    # catalogue; an AstrometryResult, declared here rather than attached to the
+    # instance out of nowhere.
+    registration: object = None
 
     def cutout(self, coord: SkyCoord, size_arcmin: float) -> "ReferenceImage":
         size = (size_arcmin * u.arcmin, size_arcmin * u.arcmin)

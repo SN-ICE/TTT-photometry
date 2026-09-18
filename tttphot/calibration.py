@@ -92,22 +92,6 @@ def _sigma_clipped_fit(x: np.ndarray, y: np.ndarray, w: np.ndarray, fit_slope: b
     return intercept, slope, intercept_err, slope_err, rms, keep
 
 
-class _Relaxed:
-    """A read-only view of the configuration with a few keys overridden."""
-
-    def __init__(self, cfg, overrides: dict):
-        self._cfg = cfg
-        self._overrides = overrides
-
-    def get(self, dotted, default=None):
-        if dotted in self._overrides:
-            return self._overrides[dotted]
-        return self._cfg.get(dotted, default)
-
-    def resolve_path(self, value):
-        return self._cfg.resolve_path(value)
-
-
 # Tried in order when the strict cuts leave too few calibration stars. Each
 # step trades catalogue precision for numbers: a zero point averaged over ten
 # stars of 0.1 mag beats one from three stars of 0.03, because the scatter
@@ -150,7 +134,7 @@ def calibrate_image(image, sources: Table, fwhm_px: float, cfg, cache_root: Path
                 # A handful of stars cannot constrain a colour term as well as
                 # a zero point, and trying makes both worse.
                 settings["calibration.color_term"] = "none"
-            view = _Relaxed(cfg, settings) if settings else cfg
+            view = cfg.overridden(settings) if settings else cfg
 
             result = _calibrate_once(image, sources, fwhm_px, view, cache_root,
                                      apcor_mag=apcor_mag, refresh=refresh)

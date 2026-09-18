@@ -20,7 +20,7 @@ COLUMNS = [
     "cal_provider", "cal_nstars", "cal_rms", "mag_offset",
     "apcor", "apcor_err", "aperture_radius_px",
     "fwhm_arcsec", "sky_adu", "sky_rms_adu", "exptime", "airmass",
-    "astrom_rms_arcsec", "astrom_nstars", "detector", "pixel_scale", "rebin", "gain_eff", "sky_noise_ratio",
+    "astrom_rms_arcsec", "astrom_nstars", "detector", "camera", "pixel_scale", "rebin", "gain_eff", "sky_noise_ratio",
     "pattern_applied", "fringe_scale_adu",
     "obs_zp", "obs_zp_err", "obs_maglim", "obs_seeing_arcsec",
     "diff_verdict", "diff_dipole_fraction", "diff_dipole_alignment", "diff_quality_nsources",
@@ -212,6 +212,13 @@ def reselect_primary(frame: pd.DataFrame, preference: str = "auto",
 
 def to_frame(rows: Iterable[dict]) -> pd.DataFrame:
     frame = pd.DataFrame(list(rows))
+    # Anything not in COLUMNS is dropped on the next line. That is the point --
+    # the output schema is fixed -- but it used to happen in silence, so a new
+    # diagnostic added upstream and forgotten here vanished without a word.
+    dropped = sorted(set(frame.columns) - set(COLUMNS))
+    if dropped:
+        log.warning("these measured values are not in lightcurve.COLUMNS and will "
+                    "not be written: %s", ", ".join(dropped))
     for column in COLUMNS:
         if column not in frame.columns:
             frame[column] = np.nan

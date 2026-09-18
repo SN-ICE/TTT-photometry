@@ -38,8 +38,8 @@ from . import subtraction as sub
 from .calibration import ZeroPoint, calibrate_image
 from .detection import detect_sources, filter_by_profile, measure_fwhm, select_psf_stars
 from .image import ScienceImage
-from .utils import (edge_margin_px, ensure_dir, first_header_value, get_logger,
-                    slugify)
+from .utils import (UserError, edge_margin_px, ensure_dir, first_header_value,
+                    get_logger, slugify)
 
 log = get_logger("tttphot.pipeline")
 
@@ -204,8 +204,8 @@ def resolve_target_coord(cfg, index: Sequence[EpochIndex], instrument: dict) -> 
             what = label
             break
     if not ras:
-        raise RuntimeError("cannot determine the target position; set target.ra / target.dec "
-                           "in targets/<NAME>.yaml or configure TNS credentials")
+        raise UserError("cannot determine the target position; set target.ra / target.dec "
+                        "in targets/<NAME>.yaml or configure TNS credentials")
     coord = SkyCoord(float(np.median(ras)) * u.deg, float(np.median(decs)) * u.deg)
     log.info("starting from %s (%s)", what, coord.to_string("hmsdms", precision=1))
     return coord, False
@@ -469,6 +469,10 @@ def process_image(image: ScienceImage, cfg, coord: SkyCoord, cache_root: Path,
         astrom_rms_arcsec=image.qa.get("astrom_rms_arcsec", np.nan),
         astrom_nstars=image.qa.get("astrom_nstars", np.nan),
         detector=identify(image.header).label,
+        # The camera on its own, because the per-camera zero-point transfer
+        # needs it and used to recover it by splitting `detector` on whitespace
+        # -- a silent coupling to a label format defined in another module.
+        camera=identify(image.header).instrument,
         pixel_scale=image.meta.pixel_scale,
         rebin=image.qa.get("rebin", 1),
         gain_eff=image.meta.gain,
@@ -967,7 +971,7 @@ def run(cfg, target: str, bands: Optional[Sequence[str]] = None,
 
     paths = find_images(cfg, target)
     if not paths:
-        raise RuntimeError(f"no FITS files found for {target} under {cfg.data_root}")
+        raise UserError(f"no FITS files found for {target} under {cfg.data_root}")
     full_index = index_images(paths, instrument, target=None, cfg=cfg)
     if bands:
         full_index = [e for e in full_index if e.band in bands]
@@ -977,7 +981,7 @@ def run(cfg, target: str, bands: Optional[Sequence[str]] = None,
     if max_images:
         index = index[:max_images]
     if not index:
-        raise RuntimeError("no epochs left after filtering")
+        raise UserError("no epochs left after filtering")
 
     present = sorted({e.band for e in index})
     log.info("%s: %d images, bands %s, MJD %.3f-%.3f", target, len(index), ",".join(present),
@@ -1070,7 +1074,7 @@ def run(cfg, target: str, bands: Optional[Sequence[str]] = None,
             image = None
 
     if not rows:
-        raise RuntimeError("no photometry could be measured")
+        raise UserError("no photometry could be measured")
 
     frame = lc.to_frame(rows)
     frame = _flag_collapsed_kernels(frame, cfg)

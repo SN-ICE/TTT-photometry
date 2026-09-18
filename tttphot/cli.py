@@ -17,7 +17,7 @@ from pathlib import Path
 import numpy as np
 
 from .config import Config, PIPELINE_ROOT
-from .utils import get_logger, setup_logging
+from .utils import UserError, get_logger, setup_logging
 
 log = get_logger("tttphot.cli")
 
@@ -968,8 +968,12 @@ def main(argv=None) -> int:
     except KeyboardInterrupt:
         print("interrupted", file=sys.stderr)
         return 130
-    except (RuntimeError, FileNotFoundError, KeyError) as exc:
+    except (UserError, FileNotFoundError) as exc:
         # Expected: the data or the configuration is not what was asked for.
+        # Deliberately NOT bare RuntimeError/KeyError -- those are also what a
+        # programming mistake raises (build_error_map called before
+        # estimate_background, a degenerate kernel solve), and catching them
+        # here reported a bug as a data problem and swallowed its traceback.
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except Exception:

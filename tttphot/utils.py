@@ -11,6 +11,17 @@ from typing import Iterable, Optional, Sequence
 
 import numpy as np
 
+class UserError(Exception):
+    """The data or the configuration is not what was asked for.
+
+    Distinct from every other exception, which means tttphot itself broke. The
+    CLI maps this to exit 1 with a one-line message and everything else to exit
+    2 with a traceback; raising a bare RuntimeError for a user-facing problem
+    (as several call sites used to) made a genuine bug look like a data problem
+    and hid its traceback.
+    """
+
+
 LOG_FORMAT = "%(asctime)s %(levelname)-7s %(name)-18s %(message)s"
 DATE_FORMAT = "%H:%M:%S"
 

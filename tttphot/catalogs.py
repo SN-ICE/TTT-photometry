@@ -31,7 +31,7 @@ from astropy.coordinates import SkyCoord
 from astropy.table import Table
 import astropy.units as u
 
-from .utils import ensure_dir, get_logger
+from .utils import UserError, ensure_dir, get_logger
 
 log = get_logger("tttphot.catalogs")
 
@@ -60,8 +60,8 @@ BAND_COLOR = {
 }
 
 
-class CatalogError(RuntimeError):
-    pass
+class CatalogError(UserError):
+    """A reference catalogue could not be fetched or has nothing usable."""
 
 
 def _float_column(table, name, default=float("nan")):
@@ -152,9 +152,12 @@ def fetch_gaia_synth(ra: float, dec: float, radius_arcmin: float,
         f"CIRCLE('ICRS', {ra:.7f}, {dec:.7f}, {radius_arcmin / 60.0:.7f}))"
     )
     log.info("querying Gaia DR3 GSPC around %.5f %+.5f (r=%.1f')", ra, dec, radius_arcmin)
-    Gaia.ROW_LIMIT = row_limit
-    job = Gaia.launch_job_async(adql)
-    raw = job.get_results()
+    previous_limit = Gaia.ROW_LIMIT
+    try:
+        Gaia.ROW_LIMIT = row_limit
+        raw = Gaia.launch_job_async(adql).get_results()
+    finally:
+        Gaia.ROW_LIMIT = previous_limit
     if raw is None or len(raw) == 0:
         raise CatalogError("Gaia GSPC returned no sources")
 
@@ -215,8 +218,12 @@ def fetch_gaia_astrometry(ra: float, dec: float, radius_arcmin: float,
     )
     log.info("querying Gaia DR3 positions around %.5f %+.5f (r=%.1f', G < %.1f)",
              ra, dec, radius_arcmin, max_mag)
-    Gaia.ROW_LIMIT = row_limit
-    raw = Gaia.launch_job_async(adql).get_results()
+    previous_limit = Gaia.ROW_LIMIT
+    try:
+        Gaia.ROW_LIMIT = row_limit
+        raw = Gaia.launch_job_async(adql).get_results()
+    finally:
+        Gaia.ROW_LIMIT = previous_limit
     if raw is None or len(raw) == 0:
         raise CatalogError("Gaia returned no astrometric sources")
 

@@ -9,7 +9,7 @@ from typing import Any, Mapping, Optional
 
 import yaml
 
-from .utils import find_by_designation, get_logger
+from .utils import UserError, find_by_designation, get_logger
 
 log = get_logger("tttphot.config")
 
@@ -142,8 +142,24 @@ class Config:
     def require(self, dotted: str) -> Any:
         value = self.get(dotted, None)
         if value is None:
-            raise KeyError(f"required configuration key missing: {dotted}")
+            raise UserError(f"required configuration key missing: {dotted}")
         return value
+
+    def overridden(self, values: Mapping) -> "Config":
+        """A copy of this configuration with some dotted keys replaced.
+
+        Used by the calibration relaxation ladder, which needs the same
+        configuration with a few cuts loosened. It was a two-method stand-in
+        class before, forwarding only ``get`` and ``resolve_path``; the first
+        callee to reach for ``require``, ``cache_root``, ``as_dict`` or
+        ``cfg[...]`` would have broken the relaxed path while the strict one
+        kept working, which is a nasty way to find out.
+        """
+        clone = Config(copy.deepcopy(self._data))
+        clone._warned_instruments = self._warned_instruments
+        for dotted, value in (values or {}).items():
+            clone.set(dotted, value)
+        return clone
 
     def set(self, dotted: str, value: Any) -> None:
         parts = dotted.split(".")
@@ -210,7 +226,7 @@ class Config:
     def data_root(self) -> Path:
         value = self.get("paths.data_root")
         if not value:
-            raise KeyError("paths.data_root must be set (directory holding the FITS images)")
+            raise UserError("paths.data_root must be set (directory holding the FITS images)")
         return Path(value).expanduser()
 
     @property

@@ -2,13 +2,21 @@
 
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
 
 import matplotlib
-matplotlib.use("Agg")
+# Headless by default -- a pipeline run must never try to open a window -- but
+# not at the cost of someone else's session. This module is imported by
+# tttphot.pipeline, so an unconditional use("Agg") silently killed interactive
+# plotting for anyone importing the pipeline from a notebook. Defer to an
+# explicit MPLBACKEND and to a pyplot that is already up.
+if "matplotlib.pyplot" not in sys.modules and not os.environ.get("MPLBACKEND"):
+    matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 from astropy.visualization import ZScaleInterval  # noqa: E402
 
