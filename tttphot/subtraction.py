@@ -88,35 +88,18 @@ def _polynomial_terms(shape, order: int) -> list[np.ndarray]:
 
 
 # --------------------------------------------------------------------------
-def _select_stamps(science: np.ndarray, mask: np.ndarray, fwhm_px: float,
-                   n_stamps: int, half: int, avoid_xy=None,
+# At most this many candidates are examined per threshold. The list is sorted
+# brightest first and the good ones are taken from the top, so the tail is only
+# ever reached on a field where almost everything is being rejected.
+_MAX_CANDIDATES = 600
+
+
+def _accept_stamps(found, science: np.ndarray, mask: np.ndarray, n_stamps: int,
+                   half: int, peak_limit: float, avoid_xy=None,
                    avoid_radius: float = 0.0) -> list[tuple[int, int]]:
-    """Positions of bright, isolated, unsaturated sources to fit the kernel on."""
-    from photutils.detection import DAOStarFinder
-
-    _, median, std = sigma_clipped_stats(science, mask=mask, sigma=3.0)
-    # A stamp with nothing unmasked left in it gives a masked std, which
-    # DAOStarFinder rejects from deep inside photutils with a message about
-    # quantities. Say the useful thing here instead and let the caller's
-    # "too few pixels to solve for the kernel" be what the log shows.
-    if not np.isfinite(std) or std <= 0:
-        return []
-    found = None
-    for threshold in (30.0, 15.0, 8.0, 5.0):
-        finder = DAOStarFinder(fwhm=max(fwhm_px, 1.5), threshold=threshold * std,
-                               exclude_border=True)
-        candidates = finder(science - median, mask=mask)
-        if candidates is not None and len(candidates) >= min(n_stamps, 12):
-            found = candidates
-            break
-        if candidates is not None and (found is None or len(candidates) > len(found)):
-            found = candidates
-    if found is None or len(found) == 0:
-        return []
-
-    found = found[np.argsort(-np.asarray(found["flux"]))]
+    """The cuts a candidate has to survive to become a kernel stamp."""
+    found = found[np.argsort(-np.asarray(found["flux"]))][:_MAX_CANDIDATES]
     ny, nx = science.shape
-    peak_limit = np.nanpercentile(science, 99.999)
     picks: list[tuple[int, int]] = []
     for row in found:
         x, y = int(round(float(row["xcentroid"]))), int(round(float(row["ycentroid"])))
@@ -137,6 +120,63 @@ def _select_stamps(science: np.ndarray, mask: np.ndarray, fwhm_px: float,
         if len(picks) >= n_stamps:
             break
     return picks
+
+
+def _select_stamps(science: np.ndarray, mask: np.ndarray, fwhm_px: float,
+                   n_stamps: int, half: int, avoid_xy=None,
+                   avoid_radius: float = 0.0) -> list[tuple[int, int]]:
+    """Positions of bright, isolated, unsaturated sources to fit the kernel on.
+
+    The detection threshold is lowered until there are enough stamps that
+    *survive the cuts*, not until there are enough candidates. Counting
+    candidates was measurably wrong: the ladder stopped as soon as a rung
+    returned twelve of them, whatever ``n_stamps`` asked for, and then four to
+    eight of those twelve were thrown away for having a masked pixel -- a
+    saturation halo, a cosmic ray -- inside the stamp box. On the sparse
+    SN 2026abwp field 30 sigma gave 15-17 candidates and 7-10 stamps against the
+    40 requested, while 5 sigma had 47-60 candidates waiting one rung below.
+
+    That matters more than it sounds. The kernel's overall flux scale is what
+    sets how much reference is subtracted, the host there is 2.6-4.5 times the
+    transient inside the aperture, and so a few per cent of scatter in the
+    kernel sum becomes a tenth of a magnitude in the light curve: two r frames
+    nine minutes apart came out 0.21 mag (5.4 sigma) apart, of which the
+    kernel-sum difference alone accounted for 95 per cent.
+
+    Candidates are taken brightest first, so a deeper threshold can only add
+    fainter stars after the bright ones have been used -- it never displaces a
+    good stamp with a worse one.
+    """
+    from photutils.detection import DAOStarFinder
+
+    _, median, std = sigma_clipped_stats(science, mask=mask, sigma=3.0)
+    # A stamp with nothing unmasked left in it gives a masked std, which
+    # DAOStarFinder rejects from deep inside photutils with a message about
+    # quantities. Say the useful thing here instead and let the caller's
+    # "too few pixels to solve for the kernel" be what the log shows.
+    if not np.isfinite(std) or std <= 0:
+        return []
+
+    peak_limit = float(np.nanpercentile(science, 99.999))
+    best: list[tuple[int, int]] = []
+    for threshold in (30.0, 15.0, 8.0, 5.0, 3.0):
+        try:
+            candidates = DAOStarFinder(fwhm=max(fwhm_px, 1.5), threshold=threshold * std,
+                                       exclude_border=True)(science - median, mask=mask)
+        except Exception:
+            break
+        if candidates is None or len(candidates) == 0:
+            continue
+        picks = _accept_stamps(candidates, science, mask, n_stamps, half,
+                               peak_limit, avoid_xy, avoid_radius)
+        if len(picks) > len(best):
+            best = picks
+        if len(best) >= n_stamps:
+            break
+    if len(best) < n_stamps:
+        log.debug("only %d of the %d requested kernel stamps survived the cuts",
+                  len(best), n_stamps)
+    return best
 
 
 def solve_kernel(science: np.ndarray, reference: np.ndarray, mask: np.ndarray,

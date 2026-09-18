@@ -936,6 +936,8 @@ def _flag_collapsed_kernels(frame, cfg):
     tol = float(cfg.get("subtraction.kernel_sum_tolerance", 3.0))
     if tol <= 1:
         return frame
+    min_images = int(cfg.get("subtraction.kernel_sum_min_images", 5))
+    warn_fraction = float(cfg.get("subtraction.kernel_sum_warn_fraction", 0.05) or 0)
 
     values, keys = _kernel_sum_comparable(frame, cfg)
     is_diff = frame["method"].astype(str).str.startswith("difference")
@@ -948,9 +950,31 @@ def _flag_collapsed_kernels(frame, cfg):
         good = vals[np.isfinite(vals) & (vals > 0)]
         # One image contributes two rows (PSF and aperture), so count images.
         n_images = frame.loc[good.index, "image"].nunique() if "image" in frame else len(good)
-        if n_images < 5:
+        ref = float(np.median(good)) if len(good) else float("nan")
+
+        # The spread is worth reporting whether or not the group is big enough
+        # to reject on. The tolerance is a factor of 3 -- it catches a collapsed
+        # solve, not a wobble -- but a few per cent of scatter in the kernel sum
+        # is a tenth of a magnitude once the host in the aperture is a few times
+        # the transient, and that used to go by in silence.
+        if np.isfinite(ref) and ref > 0 and len(good) > 1:
+            spread = float(np.ptp(good) / ref)
+            if warn_fraction > 0 and spread > warn_fraction:
+                log.warning("%s %s (%s): the normalised kernel sum spans %.1f%% across "
+                            "%d frames. The kernel's flux scale sets how much reference "
+                            "is subtracted, so on a bright host this is a real magnitude "
+                            "error, not a rounding one. Check diff_nstamps.",
+                            key[0], key[1] or "reference",
+                            "normalised" if key[2] == "calibrated" else key[2],
+                            100 * spread, n_images)
+
+        if n_images < min_images:
+            log.info("%s %s (%s): only %d frames, so the kernel-sum consistency check "
+                     "was skipped (needs %d, see subtraction.kernel_sum_min_images)",
+                     key[0], key[1] or "reference",
+                     "normalised" if key[2] == "calibrated" else key[2],
+                     n_images, min_images)
             continue
-        ref = float(np.median(good))
         if not np.isfinite(ref) or ref <= 0:
             continue
         bad = idx[(~np.isfinite(vals)) | (vals <= 0)

@@ -153,6 +153,57 @@ def test_solve_kernel_refuses_a_stamp_with_nothing_to_fit():
         sub.solve_kernel(science, reference, mask, 4.6, cfg)
 
 
+def test_stamp_selection_digs_deeper_when_the_cuts_eat_the_candidates():
+    """The threshold ladder must count stamps that survive, not candidates.
+
+    It used to stop as soon as a rung returned twelve candidates, whatever
+    n_stamps asked for. On the sparse SN 2026abwp field 30 sigma gave 15-17
+    candidates of which 4-8 were then thrown out for a masked pixel in the
+    stamp box, leaving 7-10 stamps against the 40 requested -- while 5 sigma had
+    47-60 candidates one rung below.
+    """
+    n = 300
+    rng = np.random.default_rng(11)
+    yy, xx = np.mgrid[0:n, 0:n].astype(float)
+    science = np.full((n, n), 50.0) + rng.normal(0, 2.0, (n, n))
+    sigma = 4.0 / 2.3548200
+    bright, faint = [], []
+    for k in range(40):
+        x0, y0 = rng.uniform(40, n - 40, 2)
+        # a dozen bright stars, the rest well below the 30-sigma rung
+        peak = 4000.0 if k < 12 else 60.0
+        science += peak * np.exp(-((xx - x0) ** 2 + (yy - y0) ** 2) / (2 * sigma ** 2))
+        (bright if k < 12 else faint).append((x0, y0))
+
+    mask = np.zeros(science.shape, dtype=bool)
+    # Mask most of the bright ones, as a saturation halo or a cosmic ray would.
+    for x0, y0 in bright[:8]:
+        mask[int(y0), int(x0)] = True
+
+    picks = sub._select_stamps(science, mask, 4.0, n_stamps=20, half=12)
+    # Four bright stars survive the mask; the rest must come from deeper rungs.
+    assert len(picks) > 4, f"ladder stopped early: only {len(picks)} stamps"
+
+
+def test_stamp_selection_stops_once_it_has_enough():
+    """A rich field must not pay for the deeper rungs it does not need."""
+    science = gaussian_field(n=300, n_stars=60, fwhm=4.0, seed=3) + 50.0
+    mask = np.zeros(science.shape, dtype=bool)
+    picks = sub._select_stamps(science, mask, 4.0, n_stamps=10, half=12)
+    assert len(picks) == 10
+
+
+def test_stamp_selection_keeps_clear_of_the_target():
+    science = gaussian_field(n=300, n_stars=40, fwhm=4.0, seed=4) + 50.0
+    mask = np.zeros(science.shape, dtype=bool)
+    plain = sub._select_stamps(science, mask, 4.0, n_stamps=40, half=12)
+    assert plain, "no stamps at all"
+    x0, y0 = plain[0]
+    guarded = sub._select_stamps(science, mask, 4.0, n_stamps=40, half=12,
+                                 avoid_xy=(x0, y0), avoid_radius=20.0)
+    assert (x0, y0) not in guarded
+
+
 def test_gaussian_basis_is_normalised_and_mean_subtracted():
     """Only the first term carries flux, so sum(kernel) is set by its
     coefficient alone -- which is what makes the kernel sum meaningful."""
