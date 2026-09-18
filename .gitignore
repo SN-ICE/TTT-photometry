@@ -1,4 +1,5 @@
 runs/
+runs_before_fixes/
 cache/
 calib/*.png
 tests/synthetic_catalog.csv
