@@ -199,9 +199,21 @@ def _transfer_one(frame: pd.DataFrame, cfg=None, min_nights: int = 3,
         limiting_sigma = float(cfg.get("calibration.limiting_sigma", limiting_sigma))
 
     frame = frame.copy()
-    for column in ("zp_source", "mag_offset"):
+    # Every column this function reads back or rewrites, so a table that is
+    # missing one gains it rather than raising. Writing cell by cell used to
+    # create them implicitly; taking a snapshot and assigning per column does
+    # not, and a hand-built or older table would have died on the difference.
+    # The fill value carries the dtype: a text or boolean column created as NaN
+    # is float64, and writing a string or a bool into it is an incompatible-dtype
+    # assignment that pandas warns about now and will refuse later.
+    ensure = {"zp_source": "", "cal_provider": "", "is_limit": False, "flags": 0,
+              "mag_offset": np.nan, "snr": np.nan, "mag": np.nan, "mag_err": np.nan,
+              "limit_mag": np.nan, "flux": np.nan, "flux_err": np.nan,
+              "flux_err_sys": np.nan, "apcor": np.nan, "sky_rms_adu": np.nan,
+              "aperture_radius_px": np.nan, "exptime": np.nan}
+    for column, fill in ensure.items():
         if column not in frame.columns:
-            frame[column] = np.nan
+            frame[column] = fill
     frame["zp_source"] = frame["zp_source"].fillna(
         pd.Series(np.where(np.isfinite(frame["zp"]), "fit", ""), index=frame.index))
 
@@ -297,6 +309,12 @@ def _transfer_one(frame: pd.DataFrame, cfg=None, min_nights: int = 3,
                         -2.5 * np.log10(limiting_sigma * noise) + offset_mag + zp)
 
         for name, values in new.items():
+            # is_limit is boolean and mag is not; assigning a list into a column
+            # of the wrong dtype is deprecated, so widen it once if it comes to
+            # that rather than letting pandas guess.
+            if frame[name].dtype == bool and not all(isinstance(v, (bool, np.bool_))
+                                                     for v in values):
+                frame[name] = frame[name].astype(object)
             frame.loc[index, name] = values
 
         report["recovered"].append({"image": str(image), "band": str(band),

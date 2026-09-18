@@ -281,8 +281,17 @@ frames in 1-3" seeing agree to within their errors (reduced chi2 0.2-1.1,
 from 1.7-15 before).
 
 ```bash
+pytest                                                            # unit tests, ~2 s
 python tests/selftest_injection.py ~/Desktop/TTT/<a frame>.fits   # offline, ~2 min
 ```
+
+`pytest` needs no data, no network and no telescope: it checks the gain and
+binning arithmetic, the WCS rescaling under rebinning, the zero-point fit and
+its outlier rejection, the catalogue cuts, the band-to-band zero-point
+transfer, the primary-method choice and the host guard, the kernel solve (it
+recovers a known flux scale and a centred kernel from a synthetic field), and
+aperture photometry against an analytic Gaussian. `pip install -e ".[test]"`
+installs what it needs.
 
 ---
 

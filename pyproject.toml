@@ -17,8 +17,18 @@ dependencies = [
     "pandas>=2.0", "PyYAML>=6.0", "requests>=2.28", "astroscrappy>=1.1",
 ]
 
+[project.optional-dependencies]
+test = ["pytest>=7.0"]
+
 [project.scripts]
 tttphot = "tttphot.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["tttphot*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# The two selftest scripts need a real frame and a network; the unit tests need
+# neither, so a bare `pytest` runs only those.
+python_files = ["test_*.py"]
+filterwarnings = ["error::FutureWarning"]

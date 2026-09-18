@@ -95,6 +95,12 @@ def _select_stamps(science: np.ndarray, mask: np.ndarray, fwhm_px: float,
     from photutils.detection import DAOStarFinder
 
     _, median, std = sigma_clipped_stats(science, mask=mask, sigma=3.0)
+    # A stamp with nothing unmasked left in it gives a masked std, which
+    # DAOStarFinder rejects from deep inside photutils with a message about
+    # quantities. Say the useful thing here instead and let the caller's
+    # "too few pixels to solve for the kernel" be what the log shows.
+    if not np.isfinite(std) or std <= 0:
+        return []
     found = None
     for threshold in (30.0, 15.0, 8.0, 5.0):
         finder = DAOStarFinder(fwhm=max(fwhm_px, 1.5), threshold=threshold * std,
