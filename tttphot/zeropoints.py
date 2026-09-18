@@ -139,8 +139,48 @@ def _partner(band, night, per_night, offsets, min_nights, max_scatter):
     return (best["band"], best["zp"] - 0.0, best["scatter"], 0.0, best["n"])
 
 
+def camera_of(frame: pd.DataFrame) -> pd.Series:
+    """The camera each row was taken with: the instrument part of ``detector``
+    (``QHY600-TTT3``, ``iKon936-TTT3``), without the readout geometry.
+
+    Band-to-band offsets are a property of one camera's filters and detector,
+    and a zero point is a property of one camera's sensitivity: on SN 2026abgb
+    the iKon936 zero points sit 1.4 mag above the QHY600 ones in the same band
+    on the same night. Mixing cameras in one per-night median would turn the
+    offsets into noise (g-i scattered by 0.62 mag across nights that way).
+    """
+    if "detector" not in frame.columns:
+        return pd.Series("", index=frame.index)
+    return frame["detector"].fillna("").astype(str).str.split().str[0].fillna("")
+
+
 def transfer(frame: pd.DataFrame, cfg=None, min_nights: int = 3,
              max_scatter: float = 0.25) -> tuple:
+    """Fill in missing zero points from another band of the same night and camera.
+
+    Each camera is handled on its own (see ``camera_of``). Returns (frame,
+    report); the report's offsets are keyed ``camera:a-b`` when there is more
+    than one camera.
+    """
+    cameras = camera_of(frame)
+    names = [c for c in pd.unique(cameras)]
+    if len(names) <= 1:
+        return _transfer_one(frame, cfg, min_nights, max_scatter)
+    pieces, report = [], {"offsets": {}, "recovered": [], "unrecovered": [],
+                          "approximate_offset": 0}
+    for name in names:
+        part, rep = _transfer_one(frame[cameras == name], cfg, min_nights, max_scatter,
+                                  label=name or "unknown camera")
+        pieces.append(part)
+        report["offsets"].update({f"{name}:{k}": v for k, v in rep["offsets"].items()})
+        report["recovered"] += rep["recovered"]
+        report["unrecovered"] += rep["unrecovered"]
+        report["approximate_offset"] += rep["approximate_offset"]
+    return pd.concat(pieces).loc[frame.index], report
+
+
+def _transfer_one(frame: pd.DataFrame, cfg=None, min_nights: int = 3,
+                  max_scatter: float = 0.25, label: str = "") -> tuple:
     """Fill in missing zero points from another band of the same night.
 
     Returns (frame, report). Rows that gain a zero point are recalculated and
@@ -164,7 +204,8 @@ def transfer(frame: pd.DataFrame, cfg=None, min_nights: int = 3,
                           for (a, b), v in offsets.items()},
               "recovered": [], "unrecovered": [], "approximate_offset": 0}
     if not offsets:
-        log.info("not enough overlapping nights to measure band offsets")
+        log.info("%snot enough overlapping nights to measure band offsets",
+                 f"{label}: " if label else "")
         return frame, report
 
     known = frame.dropna(subset=["zp"]).copy()
@@ -220,8 +261,10 @@ def transfer(frame: pd.DataFrame, cfg=None, min_nights: int = 3,
             frame.loc[row_index, "snr"] = snr
             if np.isfinite(flux) and flux > 0 and np.isfinite(snr) and snr >= 3.0:
                 frame.loc[row_index, "mag"] = -2.5 * np.log10(flux) + offset_mag + zp
+                sys = row.get("flux_err_sys", 0.0)
+                sys = float(sys) if sys is not None and np.isfinite(sys) else 0.0
                 frame.loc[row_index, "mag_err"] = float(np.hypot(
-                    1.0857362 * flux_err / flux, zp_err))
+                    1.0857362 * np.hypot(flux_err, sys) / flux, zp_err))
                 frame.loc[row_index, "is_limit"] = False
             else:
                 frame.loc[row_index, "mag"] = np.nan

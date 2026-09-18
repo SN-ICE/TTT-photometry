@@ -89,16 +89,13 @@ def index_images(paths: Iterable[Path], instrument: dict,
 
 
 def normalise_name(name: str) -> str:
-    """Comparable form of a transient name.
+    """Comparable form of a transient name ('SN 2026abgb', 'AT2026abgb' -> '2026abgb').
 
-    'SN 2026abgb', 'SN2026abgb', 'AT2026abgb', '2026abgb' and 'sn_2026abgb' all
-    become '2026abgb'. TTT writes the bare TNS designation into OBJECT, while a
-    target is usually called SN... here, so the two must meet in the middle.
+    TTT writes the bare TNS designation into OBJECT, while a target is usually
+    called SN... or AT... here, so the two must meet in the middle.
     """
-    import re
-    text = re.sub(r"[\s_\-]+", "", str(name or "")).lower()
-    match = re.match(r"^(?:sn|at|tde|kn|frb|lrn|ilrt|ln|sne)?((?:19|20)\d{2}[a-z]{1,4})$", text)
-    return match.group(1) if match else text
+    from .utils import normalise_name as _normalise
+    return _normalise(name)
 
 
 def _fits_under(directory: Path, patterns, recursive: bool) -> list[Path]:
@@ -430,6 +427,7 @@ def build_references(cfg, index: Sequence[EpochIndex], instrument: dict, coord: 
             references[band] = tpl.get_reference(
                 _FakeImage(band), cfg, cache_root, coord, siblings, target,
                 refresh=refresh, stamp_arcmin=stamp_arcmin)
+            references[band] = tpl.register_reference(references[band], astrometry_ref, cfg)
         except Exception as exc:
             log.warning("reference for band %s failed: %s", band, exc)
             references[band] = None
@@ -470,6 +468,7 @@ def process_image(image: ScienceImage, cfg, coord: SkyCoord, cache_root: Path,
         astrom_rms_arcsec=image.qa.get("astrom_rms_arcsec", np.nan),
         astrom_nstars=image.qa.get("astrom_nstars", np.nan),
         detector=identify(image.header).label,
+        pixel_scale=image.meta.pixel_scale,
         rebin=image.qa.get("rebin", 1),
         gain_eff=image.meta.gain,
         sky_noise_ratio=image.qa.get("sky_noise_ratio", np.nan),
@@ -587,7 +586,7 @@ def process_image(image: ScienceImage, cfg, coord: SkyCoord, cache_root: Path,
                                     max(image.meta.pixel_scale, 1e-3) / 2))
 
     preference = str(cfg.get("output.primary_method", "auto"))
-    best = lc.choose_primary(rows, preference)
+    best = lc.choose_primary(rows, preference, _host_guard(cfg))
     if best is not None:
         best["primary"] = True
     return rows
@@ -653,6 +652,8 @@ def _difference_rows(diff, image, cfg, coord, common, zp, limit,
         ref_nimages=diff.meta.get("reference_n_images"),
         diff_mode=diff.mode, diff_chi2=diff.chi2,
         diff_kernel_sum=diff.kernel_sum, diff_nstamps=diff.n_stamps,
+        diff_kernel_dx=diff.meta.get("kernel_dx", np.nan),
+        diff_kernel_dy=diff.meta.get("kernel_dy", np.nan),
         **quality.as_dict(),
     )
 
@@ -684,12 +685,24 @@ def _difference_rows(diff, image, cfg, coord, common, zp, limit,
         if bool(cfg.get("photometry.empirical_errors", True)) else float("nan")
     diff_err = ph.combine_errors(float(tab["flux"][0]), float(tab["flux_err"][0]),
                                  sky_sigma, image.meta.gain * scale)
+    # Imperfect host subtraction around the transient, as an extra flux error.
+    host = diffquality.host_residual(diff.difference, diff.reference_stamp, sn_xy, fwhm, cfg,
+                                     noise_per_aperture=sky_sigma)
+    ap_flux = float(tab["flux"][0])
+    diff_meta["diff_host_residual"] = (host["sigma"] / ap_flux
+                                       if np.isfinite(ap_flux) and ap_flux > 0 else np.nan)
+    diff_meta["diff_host_nsites"] = host["n"]
+    # Kept apart from the statistical error: it widens mag_err but does not
+    # decide whether the transient is detected (a bright SN on a poorly
+    # subtracted host is still there; only its magnitude is less certain).
+    host_sys = float(host["sigma"]) * float(cfg.get("subtraction.host_residual.error_scale", 0.5)) \
+        if np.isfinite(host["sigma"]) else 0.0
     rows.append(_photometry_row({**common, **diff_meta}, "difference_aperture",
                                 float(tab["flux"][0]) / scale,
                                 diff_err / scale, zp, apcor_mag, image,
                                 x=sn_xy[0], y=sn_xy[1],
                                 flags=int(tab["flags"][0]) | bad_subtraction,
-                                limit=limit))
+                                limit=limit, flux_err_sys=host_sys / scale))
 
     if not bool(cfg.get("photometry.psf.enabled", True)):
         return rows
@@ -708,13 +721,17 @@ def _difference_rows(diff, image, cfg, coord, common, zp, limit,
         if len(fit):
             dpsf_err = ph.combine_errors(float(fit["flux"][0]), float(fit["flux_err"][0]),
                                          sky_sigma, image.meta.gain * scale)
+            psf_sys = 0.0
+            if host_sys > 0 and np.isfinite(ap_flux) and ap_flux > 0:
+                # the same fractional residual, on the PSF (total-flux) scale
+                psf_sys = host_sys * abs(float(fit["flux"][0])) / ap_flux
             rows.append(_photometry_row({**common, **diff_meta}, "difference_psf",
                                         float(fit["flux"][0]) / scale,
                                         dpsf_err / scale, zp, psf_corr,
                                         image, x=float(fit["x"][0]), y=float(fit["y"][0]),
                                         dx=float(fit["dx"][0]), dy=float(fit["dy"][0]),
                                         flags=int(tab["flags"][0]) | bad_subtraction,
-                                        limit=limit))
+                                        limit=limit, flux_err_sys=psf_sys / scale))
     return rows
 
 
@@ -773,8 +790,14 @@ class _MatchedImage(_StampBase):
 
 def _photometry_row(common: dict, method: str, flux: float, flux_err: float,
                     zp: ZeroPoint, apcor_mag: float, image, x=np.nan, y=np.nan,
-                    dx=np.nan, dy=np.nan, flags: int = 0, limit: float = np.nan) -> dict:
-    """Turn a flux measurement into a calibrated row."""
+                    dx=np.nan, dy=np.nan, flags: int = 0, limit: float = np.nan,
+                    flux_err_sys: float = 0.0) -> dict:
+    """Turn a flux measurement into a calibrated row.
+
+    *flux_err* is the statistical error and alone sets the SNR, hence whether
+    the row is a detection or a limit. *flux_err_sys* (same units) is added in
+    quadrature to ``mag_err`` only.
+    """
     common = dict(common)
     flags = int(flags) | int(common.pop("flags_base", 0))
     exptime = max(image.meta.exptime, 1e-6)
@@ -786,33 +809,95 @@ def _photometry_row(common: dict, method: str, flux: float, flux_err: float,
     if zp.ok and np.isfinite(flux) and flux > 0 and np.isfinite(snr) and snr >= 3.0:
         inst = -2.5 * np.log10(flux / exptime) + apcor_mag
         mag = inst + zp.zp
-        mag_err = float(np.hypot(1.0857362 * flux_err / flux, zp.zp_err))
+        sys = flux_err_sys if np.isfinite(flux_err_sys) else 0.0
+        mag_err = float(np.hypot(1.0857362 * np.hypot(flux_err, sys) / flux, zp.zp_err))
         is_limit = False
 
     return lc.new_row(
         **common, method=method, mag=mag, mag_err=mag_err, is_limit=is_limit,
         mag_offset=apcor_mag, zp_source=("fit" if zp.ok else ""),
         flux=flux / exptime, flux_err=flux_err / exptime, snr=snr,
+        flux_err_sys=(flux_err_sys / exptime if np.isfinite(flux_err_sys) else np.nan),
         x=x, y=y, dx=dx, dy=dy, flags=flags, limit_mag=limit,
     )
 
 
 # --------------------------------------------------------------------------
+def _host_guard(cfg):
+    """``output.host_guard_mag`` as a float, or None when switched off."""
+    value = cfg.get("output.host_guard_mag", lc.HOST_GUARD_MAG)
+    if value in (None, False) or str(value).lower() in ("off", "none", "false"):
+        return None
+    return float(value)
+
+
+def _kernel_sum_comparable(frame: pd.DataFrame, cfg) -> tuple:
+    """Kernel sums put on a scale on which different epochs can be compared.
+
+    Returns ``(values, group_keys)``, both indexed like *frame*.
+
+    The raw kernel sum is the ratio of science to reference counts per pixel,
+    so it depends on everything that sets the science frame's counts: the
+    camera's sensitivity (the zero point), the exposure time, the pixel area
+    (a rebinned pixel collects four times the sky), and on which way round the
+    kernel was solved (in ``convolve_science`` mode it maps science onto the
+    reference, so it is the reciprocal). On a single-camera archive those are
+    nearly constant and the raw sum could be compared directly. TTT mixes
+    cameras on the same target -- on SN 2026abgb the QHY600 frames come out at
+    0.12-0.17 in g and the iKon936 frames at 0.78-0.92 -- and a raw comparison
+    flagged every frame of the minority camera as a failed subtraction.
+
+    Dividing out exposure time, 10**(0.4 zp) and pixel area leaves a number set
+    only by the reference, the same for every camera (and for every night,
+    since transparency moves the zero point and the kernel sum together).
+    Epochs with no zero point cannot be normalised; they are compared only with
+    uncalibrated epochs of the same detector configuration.
+    """
+    ks = pd.to_numeric(frame["diff_kernel_sum"], errors="coerce")
+    mode = frame.get("diff_mode", pd.Series("", index=frame.index)).astype(str)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        eff = np.where(mode == "convolve_science", 1.0 / ks, ks)
+    eff = pd.Series(eff, index=frame.index)
+
+    scale = pd.to_numeric(frame.get("pixel_scale", pd.Series(np.nan, index=frame.index)),
+                          errors="coerce")
+    if scale.isna().any():
+        # Tables written before the pixel_scale column: the aperture radius is
+        # aperture_scale x FWHM in pixels, and the FWHM is also given in arcsec.
+        ap_scale = float(cfg.get("photometry.aperture_scale", 1.2))
+        radius = pd.to_numeric(frame.get("aperture_radius_px"), errors="coerce")
+        fwhm = pd.to_numeric(frame.get("fwhm_arcsec"), errors="coerce")
+        with np.errstate(divide="ignore", invalid="ignore"):
+            scale = scale.fillna(ap_scale * fwhm / radius)
+
+    zp = pd.to_numeric(frame.get("zp"), errors="coerce")
+    exptime = pd.to_numeric(frame.get("exptime"), errors="coerce")
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        norm = eff / (exptime * 10.0 ** (0.4 * zp) * scale ** 2)
+    calibrated = np.isfinite(norm) & (norm > 0)
+
+    detector = frame.get("detector", pd.Series("", index=frame.index)).astype(str)
+    values = pd.Series(np.where(calibrated, norm, eff), index=frame.index)
+    keys = pd.Series(np.where(calibrated, "calibrated", detector), index=frame.index)
+    return values, keys
+
+
 def _flag_collapsed_kernels(frame, cfg):
     """Flag difference measurements whose kernel solve collapsed.
 
     The kernel sum is the flux scaling from reference to science. It is set by
     the depth and units of the template, so there is no absolute value to test
     against -- but every epoch of a band against the same reference should get
-    roughly the same one. An epoch that comes out orders of magnitude away has
+    roughly the same one, once the camera, exposure and pixel size are divided
+    out (see ``_kernel_sum_comparable``). An epoch that comes out far away has
     not found a different scaling, it has failed to find one, and the flux
     measured through it means nothing.
 
-    On SN2022xkq this is what separates the difference measurements that agree
-    with an independent reduction from those off by more than 0.3 mag: median
-    kernel sum 20.3 against 0.027. It also explains their suspiciously *low*
-    chi2 (0.36 against 5.5) -- a collapsed solve leaves an inflated noise model,
-    so the frame looks well fitted precisely because it was not fitted at all.
+    On SN2022xkq (TJO) this is what separated the difference measurements that
+    agree with an independent reduction from those off by more than 0.3 mag:
+    median kernel sum 20.3 against 0.027. It also explains their suspiciously
+    *low* chi2 (0.36 against 5.5) -- a collapsed solve leaves an inflated noise
+    model, so the frame looks well fitted precisely because it was not fitted.
     """
     if not bool(cfg.get("subtraction.check_kernel_sum", True)) or frame.empty:
         return frame
@@ -822,14 +907,18 @@ def _flag_collapsed_kernels(frame, cfg):
     if tol <= 1:
         return frame
 
-    ks = pd.to_numeric(frame["diff_kernel_sum"], errors="coerce")
+    values, keys = _kernel_sum_comparable(frame, cfg)
     is_diff = frame["method"].astype(str).str.startswith("difference")
+    ref_source = frame.get("ref_source", pd.Series("", index=frame.index)).fillna("")
     flagged = 0
-    for key, idx in frame[is_diff].groupby(
-            [frame["band"], frame.get("ref_source", "")]).groups.items():
-        vals = ks.loc[idx]
+    sub_frame = frame[is_diff]
+    for key, idx in sub_frame.groupby([sub_frame["band"], ref_source[is_diff],
+                                       keys[is_diff]]).groups.items():
+        vals = values.loc[idx]
         good = vals[np.isfinite(vals) & (vals > 0)]
-        if len(good) < 5:
+        # One image contributes two rows (PSF and aperture), so count images.
+        n_images = frame.loc[good.index, "image"].nunique() if "image" in frame else len(good)
+        if n_images < 5:
             continue
         ref = float(np.median(good))
         if not np.isfinite(ref) or ref <= 0:
@@ -838,13 +927,16 @@ def _flag_collapsed_kernels(frame, cfg):
                   | (vals > ref * tol) | (vals < ref / tol)]
         if len(bad):
             frame.loc[bad, "flags"] = (frame.loc[bad, "flags"].fillna(0).astype(int)
-                                       | lc.FLAG_BAD_SUBTRACTION)
+                                       | lc.FLAG_BAD_SUBTRACTION | lc.FLAG_KERNEL_SUM)
             flagged += len(bad)
-            log.info("%s %s: %d of %d difference epochs have a kernel sum far from "
-                     "the band median (%.3g); flagged as bad subtractions",
-                     key[0], key[1] or "reference", len(bad), len(idx), ref)
+            log.info("%s %s (%s): %d of %d difference rows have a kernel sum more than "
+                     "x%.1f from the band median; flagged as bad subtractions",
+                     key[0], key[1] or "reference",
+                     "normalised" if key[2] == "calibrated" else key[2],
+                     len(bad), len(idx), tol)
     if flagged:
-        frame = lc.reselect_primary(frame, str(cfg.get("output.primary_method", "auto")))
+        frame = lc.reselect_primary(frame, str(cfg.get("output.primary_method", "auto")),
+                                     _host_guard(cfg))
     return frame
 
 
@@ -942,8 +1034,17 @@ def run(cfg, target: str, bands: Optional[Sequence[str]] = None,
             image = prepare_image(entry.path, cfg, instrument,
                                   pattern=pattern_for(patterns, entry.band, entry.detector),
                                   astrometry_ref=astrometry_ref)
+            if image.wcs is None:
+                raise RuntimeError("no astrometric solution in the header, so the target "
+                                   "cannot be placed (the observatory pipeline failed on "
+                                   "this frame; its sky level is %.0f ADU)"
+                                   % float(image.qa.get("sky_adu", np.nan)))
             if not image.contains(coord, margin=int(cfg.get("image.edge_margin_px", 24))):
-                raise RuntimeError("the target position falls outside this frame")
+                centre = image.center_coord()
+                raise RuntimeError("the target position falls outside this frame, whose "
+                                   "centre is %.1f arcmin away (%s)" % (
+                                       centre.separation(coord).arcmin,
+                                       centre.to_string("hmsdms", precision=0)))
             rows.extend(process_image(image, cfg, coord, cache_root,
                                       references.get(entry.band), outdir, target,
                                       refresh=refresh))
@@ -962,7 +1063,8 @@ def run(cfg, target: str, bands: Optional[Sequence[str]] = None,
     if bool(cfg.get("calibration.transfer_zeropoints", True)):
         frame, transfer_report = zeropoints.transfer(frame, cfg)
         if transfer_report.get("recovered"):
-            frame = lc.reselect_primary(frame, str(cfg.get("output.primary_method", "auto")))
+            frame = lc.reselect_primary(frame, str(cfg.get("output.primary_method", "auto")),
+                                     _host_guard(cfg))
     else:
         transfer_report = {}
 
@@ -1000,6 +1102,8 @@ def run(cfg, target: str, bands: Optional[Sequence[str]] = None,
                 "path": str(ref.path) if ref.path else None,
                 "pixel_scale_arcsec": round(float(ref.pixel_scale), 4),
                 "n_images": ref.n_images,
+                "registered_shift_arcsec": (round(float(ref.registration.shift_arcsec), 3)
+                                            if getattr(ref, "registration", None) else None),
             })
             for band, ref in references.items()
         },

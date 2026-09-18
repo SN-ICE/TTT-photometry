@@ -1,0 +1,110 @@
+# TTT3 (2 m, Teide Observatory, IAU Y68) + Andor iKon-L 936 CCD
+#
+# The second camera on TTT3, used on the same targets and nights as the QHY600:
+# on SN 2026abgb the observatory takes a QHY600 g/r/i set and an iKon936 g/r/i
+# set a few minutes apart. Everything that differs from the QHY600 is here.
+#
+#   unbinned   2048 x 2048   0.230 "/px   7.85' x 7.85'   13.5 um pixels
+#   mechanical shutter, cooled to -70 C
+#
+# Frames arrive reduced (bias, flat) with a TAN-SIP solution, like the QHY600
+# ones, but the header conventions are not the same:
+#
+# - GAIN = 1.0 and RDNOISE = 6.2 describe the frame as written (XBINNING = 1),
+#   so no binning conversion applies. On the 2026abgb frames the measured sky
+#   scatter runs 5-15 per cent above what GAIN = 1.0 predicts
+#   (sky_noise_ratio 1.05-1.15), which would mean a true gain nearer
+#   0.85 e-/ADU. It only affects the Poisson term of bright sources -- the sky
+#   noise is measured, not predicted -- so the header value is kept; put
+#   `gain: [ ]` under header and `gain: 0.85` under defaults if you trust
+#   the measurement more.
+# - No GPS time stamp in row 0 (that is a QHY600 feature), so no bad_regions.
+# - The zero point for the same filter is ~1.4 mag higher than the QHY600's
+#   (25.9 against 24.4 in g): more ADU per photon and a different QE curve.
+#   Nothing in the pipeline assumes the two agree; see README "Mixed cameras".
+name: TTT3/iKon936
+telescope: TTT3
+site: Teide Observatory (Y68)
+
+header:
+  mjd: [MJD-OBS]
+  jd: [JD-OBS]
+  dateobs: [DATE-OBS]
+  exptime: [EXPTIME]
+  filter: [FILTER]
+  object: [OBJECT]
+  gain: [GAIN]                 # e- per ADU, as written
+  readnoise: [RDNOISE]         # e-
+  target_ra: []
+  target_dec: []
+  pointing_ra: [RA]            # frame centre, decimal degrees
+  pointing_dec: [DEC]
+  coord_unit: deg
+  binning_x: [XBINNING]
+  binning_y: [YBINNING]
+  n_subframes: [TOTIMA]
+  airmass: [AIRMASS]
+  imagetype: [IMAGETYP]
+  obs_zp: [ZP]
+  obs_zp_err: [EZP]
+  obs_maglim: [MAGLIM]
+  obs_seeing: [SEEING]
+
+defaults:
+  gain: 1.0
+  readnoise: 6.2
+  gain_is_unbinned: false      # header values already describe the stored pixels
+  binning_mode: sum            # CCD on-chip binning adds charge
+  stack_mode: average
+  pixel_scale: 0.23            # arcsec per unbinned pixel; only used without a WCS
+  # 16-bit ADC, bias ~238 ADU: a saturated pixel lands near 65300 after bias
+  # subtraction. Same margin as the QHY600.
+  saturation_adu: 60000
+  # auto -> 2x2 (0.46"/px). The frames' own seeing (1.2-2.3") then spans
+  # 2.6-5 px FWHM, the range the method was tuned on. 1 keeps 0.23"/px.
+  rebin: auto
+  rebin_target_arcsec: 0.35
+
+filters:
+  "SDSSu": u
+  "SDSSg": g
+  "SDSSr": r
+  "SDSSi": i
+  "SDSSz": z
+  "SDSSzs": z
+  "SDSS u": u
+  "SDSS g": g
+  "SDSS r": r
+  "SDSS i": i
+  "SDSS z": z
+  "u": u
+  "g": g
+  "r": r
+  "i": i
+  "z": z
+  "JohnsonU": U
+  "JohnsonB": B
+  "JohnsonV": V
+  "JohnsonR": R
+  "JohnsonI": I
+  "U": U
+  "B": B
+  "V": V
+  "R": R
+  "I": I
+  "Clear": C
+  "L": C
+  "Lum": C
+  "None": C
+
+systems:
+  U: vega
+  B: vega
+  V: vega
+  R: vega
+  I: vega
+  u: ab
+  g: ab
+  r: ab
+  i: ab
+  z: ab

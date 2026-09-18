@@ -13,6 +13,9 @@ PyYAML, astroscrappy). `-e` installs in place, so edits to `config/` and
 `targets/` take effect immediately. Without installing, use
 `python -m tttphot.cli ...` from inside this directory.
 
+`astroscrappy` (cosmic-ray rejection) is a dependency; without it the run
+works but warns and leaves cosmic rays in. `pip install -e .` installs it.
+
 photutils must be older than 3.0: version 3 renamed the source-finder columns
 (`xcentroid` became `x_centroid`), which breaks this code and tjophot alike.
 `pip install -e .` enforces that.
@@ -23,7 +26,9 @@ pipeline, so `tttphot resolve` works out of the box.
 ## A new target, start to finish
 
 `snname` stands for the target's name; `SN2026abgb`, `AT2026abgb` and
-`2026abgb` all find the same frames.
+`2026abgb` all find the same frames and the same `targets/` file. TNS
+registers a transient as AT and renames it SN once it is classified, so either
+prefix works for any object.
 
 ### 1. Put the frames where the pipeline looks
 
@@ -77,6 +82,20 @@ stars (they stop at G = 17.65); Pan-STARRS is the automatic fallback for griz.
 `fetch-template` writes `runs/snname/templates/template_<band>.png`: open them
 and check the reference covers the field and has no transient in it.
 
+Both are downloaded once per field. Catalogues go to `cache/catalogs/` and the
+template FITS files to `cache/templates/` in the pipeline folder, not under
+`runs/`, and every later `run`, `fetch-template` or `./full-run.sh` reuses
+them. That holds even if the target position moves by up to ~40". Neither
+`run --clean` nor `tttphot clean snname` touches them; `tttphot clean snname
+--templates` (or `--catalogs`, `--all`) deletes them, and `--refresh`
+downloads them again. To keep them somewhere else, e.g. next to the frames,
+put this in `config/local.yaml`:
+
+```yaml
+paths:
+  cache_root: ~/Desktop/TTT/cache
+```
+
 ### 4. A short trial, then the full run
 
 ```bash
@@ -98,6 +117,9 @@ In `runs/snname/snname_photometry_all.csv`:
   ~15 per cent larger (different estimator); a frame far off that trend has a
   problem.
 - `diff_chi2`, `flags_str`, and the `qa/` panels, exactly as for TJO.
+- `diff_host_residual`: how badly the host is subtracted around the transient,
+  as a fraction of its flux. Above ~0.1 the frame's value leans on the error
+  bar; with several frames that night, trust the good-seeing ones.
 
 ## Frames from another TTT telescope or camera
 

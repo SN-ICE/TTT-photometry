@@ -1,6 +1,6 @@
 # SN2026abgb -- written by 'tttphot resolve'.
 target:
   name: SN2026abgb
-  # position resolved from TNS on 2026-09-15 (object_type=SN II, redshift=0.011368, hostname=NGC7673)
+  # position resolved from TNS on 2026-09-18 (object_type=SN II, redshift=0.011368, hostname=NGC7673)
   ra: 351.9250133
   dec: 23.5880447

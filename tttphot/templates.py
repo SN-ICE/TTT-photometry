@@ -116,6 +116,17 @@ def build_ttt_stack(images: Sequence, cfg, coord: SkyCoord, band: str,
             continue
         chosen.append(im)
 
+    # Frames from different cameras (or rebinning) have different ADU per unit
+    # flux and different pixel areas; a median across them is meaningless. Keep
+    # the detector configuration that contributes most epochs.
+    if chosen:
+        labels = [detector.identify(im.header).label for im in chosen]
+        best = max(set(labels), key=labels.count)
+        if len(set(labels)) > 1:
+            log.info("ttt_stack %s: epochs span %d detectors; stacking only the %d from %s",
+                     band, len(set(labels)), labels.count(best), best)
+        chosen = [im for im, lab in zip(chosen, labels) if lab == best]
+
     if len(chosen) < min_images:
         log.info("ttt_stack %s: only %d usable epochs (need %d)", band, len(chosen), min_images)
         return None
@@ -220,10 +231,52 @@ def hips_scale_for(survey: str) -> float:
     return 1.0
 
 
+def _nearby_cached(directory: Path, prefix: str, suffix: str, ra: float, dec: float,
+                   size_px: int, scale_arcsec: float, within_arcsec: float) -> Optional[Path]:
+    """A cached cutout of the same kind centred close enough to *ra*, *dec*.
+
+    Cutouts are cached under their centre, to 5 decimals. A target position
+    that moves a few arcsec -- the TNS position replacing a first guess, a
+    refined centroid, a hand edit of the target file -- would otherwise miss
+    the cache and download the same field again. The file names are
+    ``<prefix><ra><dec>_<suffix>_<size>.fits`` (suffix may be empty). A file
+    qualifies if it is at least as large and, on each axis, the requested
+    square sits inside it give or take *within_arcsec*; the nearest wins.
+    """
+    import re
+
+    if within_arcsec is None or within_arcsec <= 0 or not directory.is_dir():
+        return None
+    tail = f"_{suffix}" if suffix else ""
+    pattern = re.compile(re.escape(prefix) + r"(\d+\.\d+)([+-]\d+\.\d+)" + re.escape(tail)
+                         + r"_(\d+)\.fits$")
+    best, best_sep = None, np.inf
+    for path in directory.glob(f"{prefix}*.fits"):
+        match = pattern.fullmatch(path.name)
+        if not match:
+            continue
+        ra_c, dec_c, size_c = float(match.group(1)), float(match.group(2)), int(match.group(3))
+        if size_c < size_px:
+            continue
+        dra = (((ra_c - ra) + 180.0) % 360.0 - 180.0) * np.cos(np.radians(dec)) * 3600.0
+        ddec = (dec_c - dec) * 3600.0
+        slack = (size_c - size_px) * scale_arcsec / 2.0 + within_arcsec
+        if abs(dra) > slack or abs(ddec) > slack:
+            continue
+        sep = float(np.hypot(dra, ddec))
+        if sep < best_sep:
+            best, best_sep = path, sep
+    if best is not None:
+        log.info("reusing cached cutout %s (centred %.1f\" from the requested position)",
+                 best.name, best_sep)
+    return best
+
+
 def fetch_hips_cutout(coord: SkyCoord, band: str, survey: str, size_arcmin: float,
                       cache_root: Path, pixel_scale: Optional[float] = None,
                       max_pixels: int = 4000, refresh: bool = False,
-                      timeout: float = 600.0) -> Optional[ReferenceImage]:
+                      timeout: float = 600.0,
+                      reuse_within_arcsec: float = 0.0) -> Optional[ReferenceImage]:
     """Render a HiPS survey to a FITS cutout through the CDS hips2fits service.
 
     The output grid is whatever we ask for, so unlike a tiled cutout service
@@ -248,6 +301,9 @@ def fetch_hips_cutout(coord: SkyCoord, band: str, survey: str, size_arcmin: floa
     slug_survey = slugify(survey.replace("/", "-"))
     cache = ensure_dir(Path(cache_root) / "templates") / \
         f"hips_{slug_survey}_{ra:.5f}{dec:+.5f}_{size_px}.fits"
+    if not cache.exists() and not refresh:
+        cache = _nearby_cached(cache.parent, f"hips_{slug_survey}_", "", ra, dec, size_px,
+                               pixel_scale, reuse_within_arcsec) or cache
 
     if cache.exists() and not refresh:
         log.info("reference for %s: cached HiPS cutout %s", band, cache.name)
@@ -435,7 +491,8 @@ def fetch_panstarrs_cutout(coord: SkyCoord, band: str, size_arcmin: float,
                            cache_root: Path, refresh: bool = False,
                            max_size_px: int = 3200,
                            timeout: float = 600.0,
-                           mosaic: bool = True) -> Optional[ReferenceImage]:
+                           mosaic: bool = True,
+                           reuse_within_arcsec: float = 0.0) -> Optional[ReferenceImage]:
     """Download a Pan-STARRS1 DR2 stacked cutout and linearise its pixels.
 
     PS1 pixels are 0.25", so a cutout is roughly (arcmin x 240) pixels a side:
@@ -460,6 +517,9 @@ def fetch_panstarrs_cutout(coord: SkyCoord, band: str, size_arcmin: float,
         size_px = int(max_size_px)
     cache = ensure_dir(Path(cache_root) / "templates") / \
         f"ps1_{ra:.5f}{dec:+.5f}_{band_token(band)}_{size_px}.fits"
+    if not cache.exists() and not refresh:
+        cache = _nearby_cached(cache.parent, "ps1_", band_token(band), ra, dec, size_px,
+                               _PS1_SCALE, reuse_within_arcsec) or cache
 
     if cache.exists() and not refresh:
         log.info("reference for %s: cached PS1 cutout %s", band, cache.name)
@@ -529,6 +589,74 @@ def linearise_ps1(data: np.ndarray, header: fits.Header) -> np.ndarray:
 
 
 # --------------------------------------------------------------------------
+def register_reference(ref: ReferenceImage, astrometry_ref, cfg) -> ReferenceImage:
+    """Tie a reference image's WCS to the same astrometric catalogue as the
+    science frames.
+
+    Every science frame is re-centred on Gaia before anything is measured, but
+    a survey template arrives with whatever WCS its own pipeline wrote, and a
+    difference image only cares about the two agreeing with each other. They
+    need not: the Pan-STARRS stack cutout for SN 2026abgb sits 0.75 px (0.26")
+    off Gaia in both axes, while the Pan-STARRS *catalogue* for the same field
+    agrees with Gaia to 20 mas. A quarter of an arcsecond is two thirds of a
+    TTT pixel, and it leaves an aligned dipole under every star and under the
+    host -- exactly what the difference-quality check then reports as a
+    misregistered reference.
+
+    The refit uses ``subtraction.register_reference`` as its mode (``shift``
+    by default, ``linear``, or ``off``) and the ``astrometry.*`` matching and
+    rejection settings, so it is only kept if it improves the residual.
+    """
+    mode = str(cfg.get("subtraction.register_reference", "shift")).lower()
+    if mode in ("off", "none", "false") or astrometry_ref is None or ref is None:
+        return ref
+    if ref.source == "ttt_stack":
+        return ref                      # built from frames already on Gaia
+    try:
+        from types import SimpleNamespace
+        from astropy.table import Table
+        from photutils.detection import DAOStarFinder
+        from . import astrometry as astrom
+
+        data = np.array(ref.data, dtype=float)
+        finite = np.isfinite(data)
+        if finite.sum() < 1000:
+            return ref
+        _, median, std = sigma_clipped_stats(data[finite], sigma=3.0)
+        fwhm_px = float(np.clip(1.3 / max(ref.pixel_scale, 1e-3), 2.0, 10.0))
+        finder = DAOStarFinder(fwhm=fwhm_px, threshold=10.0 * std, exclude_border=True)
+        found = finder(np.where(finite, data - median, 0.0), mask=~finite)
+        if found is None or len(found) < int(cfg.get("astrometry.min_stars", 8)):
+            log.info("reference for %s: too few stars to register it on the astrometric "
+                     "catalogue; keeping its own WCS", ref.band)
+            return ref
+        found = found[np.argsort(-np.asarray(found["flux"]))][:400]
+        sources = Table({"xcentroid": np.asarray(found["xcentroid"], float),
+                         "ycentroid": np.asarray(found["ycentroid"], float)})
+        shim = SimpleNamespace(wcs=ref.wcs, data=data,
+                               meta=SimpleNamespace(path=Path(f"reference_{ref.band}")))
+        local = cfg.as_dict()
+        local.setdefault("astrometry", {})["mode"] = mode
+        from .config import Config
+        result = astrom.refine_wcs(shim, sources, astrometry_ref, Config(local))
+        if result.ok and result.wcs is not None:
+            ref.wcs = result.wcs
+            ref.header["TTTREGSH"] = (round(float(result.shift_arcsec), 4),
+                                      "arcsec the WCS moved when registered to Gaia")
+            log.info("reference for %s: registered on the astrometric catalogue (%s, "
+                     "%d stars, rms %.3f\" -> %.3f\", moved %.2f\")", ref.band, mode,
+                     result.n_stars, result.rms_before, result.rms_after,
+                     result.shift_arcsec)
+            ref.registration = result
+        else:
+            log.info("reference for %s: not re-registered (%s)", ref.band, result.message)
+    except Exception as exc:
+        log.warning("reference for %s: registration failed (%s); keeping its own WCS",
+                    ref.band, exc)
+    return ref
+
+
+# --------------------------------------------------------------------------
 def get_reference(image, cfg, cache_root: Path, coord: SkyCoord,
                   siblings: Sequence, target: str,
                   refresh: bool = False,
@@ -543,6 +671,15 @@ def get_reference(image, cfg, cache_root: Path, coord: SkyCoord,
     # The reference only has to cover the science stamp plus a margin for the
     # reprojection edges; asking PS1 for much more is a slow, large download.
     ps1_size = float(cfg.get("subtraction.panstarrs.size_arcmin", 0) or 0) or stamp * 1.25
+    # A cached cutout centred a little off still covers the stamp if the offset
+    # stays inside that margin; 'auto' keeps 20 per cent of the margin in hand.
+    reuse = cfg.get("subtraction.reuse_cached_within_arcsec", "auto")
+    if reuse in (None, False) or str(reuse).lower() in ("off", "none", "false"):
+        reuse = 0.0
+    elif str(reuse).lower() == "auto":
+        reuse = max(0.8 * (ps1_size - stamp) * 60.0 / 2.0, 0.0)
+    else:
+        reuse = float(reuse)
 
     # A band with no survey counterpart (B, V) can borrow the nearest one that
     # does. The PSF-matching kernel fits a single flux scale, so this subtracts
@@ -577,7 +714,8 @@ def get_reference(image, cfg, cache_root: Path, coord: SkyCoord,
                     pixel_scale=entry.get("pixel_scale"),
                     max_pixels=int(cfg.get("subtraction.hips_max_pixels", 4000)),
                     refresh=refresh,
-                    timeout=float(cfg.get("subtraction.panstarrs.timeout_s", 600.0)))
+                    timeout=float(cfg.get("subtraction.panstarrs.timeout_s", 600.0)),
+                    reuse_within_arcsec=reuse)
                 if ref is not None:
                     return ref
             elif source == "panstarrs":
@@ -590,7 +728,8 @@ def get_reference(image, cfg, cache_root: Path, coord: SkyCoord,
                     coord, fetch_band, ps1_size, cache_root, refresh=refresh,
                     max_size_px=int(cfg.get("subtraction.panstarrs.max_size_px", 3200)),
                     timeout=float(cfg.get("subtraction.panstarrs.timeout_s", 600.0)),
-                    mosaic=bool(cfg.get("subtraction.panstarrs.mosaic", True)))
+                    mosaic=bool(cfg.get("subtraction.panstarrs.mosaic", True)),
+                    reuse_within_arcsec=reuse)
                 if ref is not None:
                     ref.source_band = ref.band
                     ref.band = band

@@ -1,0 +1,6 @@
+# SN2026abwp -- written by 'tttphot resolve'.
+target:
+  name: SN2026abwp
+  # position resolved from TNS on 2026-09-18
+  ra: 61.8616961
+  dec: 1.7614879

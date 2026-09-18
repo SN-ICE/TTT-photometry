@@ -9,7 +9,7 @@ from typing import Any, Mapping, Optional
 
 import yaml
 
-from .utils import get_logger
+from .utils import find_by_designation, get_logger
 
 log = get_logger("tttphot.config")
 
@@ -82,11 +82,12 @@ class Config:
                 merged.append(auto.name)
 
         if target:
-            for candidate in (TARGET_DIR / f"{target}.yaml", TARGET_DIR / f"{target}.yml"):
-                if candidate.exists():
-                    data = deep_merge(data, load_yaml(candidate))
-                    merged.append(f"targets/{candidate.name}")
-                    break
+            # SN2026abwp finds targets/AT2026abwp.yaml and the other way round:
+            # TNS renames an AT to SN on classification.
+            candidate = find_by_designation(TARGET_DIR, target)
+            if candidate is not None:
+                data = deep_merge(data, load_yaml(candidate))
+                merged.append(f"targets/{candidate.name}")
 
         if user_config:
             data = deep_merge(data, load_yaml(user_config))

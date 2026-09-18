@@ -46,7 +46,8 @@ class Resolution:
 def tns_objname(name: str) -> str:
     """'SN2026abgb', 'SN 2026abgb', 'AT2026abgb' -> '2026abgb'."""
     cleaned = str(name).strip()
-    cleaned = re.sub(r"^(SN|AT|SNe)\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^(SNe|SN|AT|TDE)[\s_\-]*(?=(19|20)\d{2})", "", cleaned,
+                     flags=re.IGNORECASE)
     return cleaned.strip()
 
 
@@ -126,11 +127,14 @@ def resolve_simbad(name: str, timeout: float = 60.0) -> Optional[Resolution]:
     """Fall back to SIMBAD. No credentials, but coarser and slower to update."""
     from astroquery.simbad import Simbad
 
+    # SIMBAD, unlike TNS, needs the prefix, and lists a transient under the
+    # one it had when it was ingested: try AT and SN forms both.
     candidates = [str(name).strip()]
     stripped = tns_objname(name)
-    if stripped != candidates[0]:
-        candidates.append(f"SN {stripped}")
-    candidates.append(f"SN{stripped}")
+    for prefix in ("AT", "SN"):
+        for form in (f"{prefix} {stripped}", f"{prefix}{stripped}"):
+            if form not in candidates:
+                candidates.append(form)
 
     errors = []
     for candidate in candidates:
@@ -199,11 +203,11 @@ target:
 
 
 def target_file(target: str) -> Path:
+    """targets/<target>.yaml, or an existing file for the same object under
+    another prefix (AT2026abwp.yaml for SN2026abwp)."""
     from .config import TARGET_DIR
-    for candidate in (TARGET_DIR / f"{target}.yaml", TARGET_DIR / f"{target}.yml"):
-        if candidate.exists():
-            return candidate
-    return TARGET_DIR / f"{target}.yaml"
+    from .utils import find_by_designation
+    return find_by_designation(TARGET_DIR, target) or TARGET_DIR / f"{target}.yaml"
 
 
 def update_target_file(target: str, resolution: Resolution) -> tuple:

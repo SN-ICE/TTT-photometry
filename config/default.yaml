@@ -10,10 +10,14 @@ instrument: ttt3_qhy600        # -> config/instruments/<name>.yaml
 # INSTRUME header value -> config/instruments/<name>.yaml. Each frame picks its
 # own, so an archive spanning more than one telescope or camera reduces
 # correctly in one run: gain, read noise, pixel scale and saturation follow the
-# frame, not the run. To add TTT1 or TTT2, copy ttt3_qhy600.yaml, edit the
-# numbers and add its INSTRUME value here.
+# frame, not the run. TTT3 carries two cameras, and the observatory uses both
+# on the same targets; TTT4's QHY600 is the same model as TTT3's. To add another
+# camera, copy the nearest file, check the numbers against one of its headers
+# and add its INSTRUME value here (matching ignores case).
 instruments:
   QHY600-TTT3: ttt3_qhy600
+  QHY600-TTT4: ttt3_qhy600
+  iKon936-TTT3: ttt_ikon936
 
 # Transient Name Server credentials, for looking a target name up. Get a bot at
 # https://www.wis-tns.org/bots . Leave these null and export TNS_API_KEY,
@@ -142,8 +146,14 @@ detection:
   fwhm_max_arcsec: 8.0
   sharplo: 0.2
   sharphi: 1.0
-  roundlo: -0.75
-  roundhi: 0.75
+  # DAOStarFinder roundness limits. TJO used +-0.75. TTT3's QHY600 frames in
+  # good seeing have stars twice as wide along the detector columns as along
+  # the rows (2.6 px against 5.5 px FWHM on 2026-09-12), which puts the median
+  # star at roundness2 = 0.93: +-0.75 kept 7 of 78 Gaia stars and the frame
+  # lost its astrometry, calibration and PSF. Cosmic rays are removed before
+  # detection and galaxies by the profile test after it, so these can be wide.
+  roundlo: -1.5
+  roundhi: 1.5
   min_stars_for_fwhm: 6
   max_stars_for_fwhm: 40
 
@@ -272,6 +282,12 @@ subtraction:
     R: {survey: dss2-red}
     I: {survey: dss2-nir}
   hips_max_pixels: 4000
+  # Downloaded templates are cached in <cache_root>/templates under their centre.
+  # A cached cutout of the same band is reused for a target position up to this
+  # far from that centre (a TNS position replacing a first guess, a refined
+  # centroid). 'auto' = 80 per cent of the margin the cutout has around the
+  # science stamp (~40" for TTT3/QHY600); 0 or off = exact position only.
+  reuse_cached_within_arcsec: auto
   panstarrs:
     size_arcmin: null          # cutout to request; default is 1.25 x cutout_arcmin
     max_size_px: 3200          # PS1 pixels are 0.25", so this caps a request at ~13'
@@ -304,6 +320,29 @@ subtraction:
   # find one, and its flux means nothing.
   check_kernel_sum: true
   kernel_sum_tolerance: 3.0
+  # Re-register the reference image on the same astrometric catalogue as the
+  # science frames before differencing: shift | linear | off. The PS1 stack
+  # cutout for SN 2026abgb sat 0.26" off Gaia while every TTT frame was within
+  # 0.04" of it.
+  register_reference: shift
+  # Host-subtraction error. The science aperture is laid down at sites near the
+  # transient where the matched reference has a similar surface brightness;
+  # the scatter of the difference flux there (less the noise those apertures
+  # would show anyway) is added to the transient's error. Zero on a faint host.
+  host_residual:
+    enabled: true
+    sb_range: [0.5, 2.0]       # x the host surface brightness at the transient
+    radius_fwhm: 15.0          # how far from the transient to look
+    avoid_fwhm: 3.0            # keep clear of the transient itself
+    min_sites: 8
+    # Fraction of the measured scatter added (in quadrature) to mag_err. The
+    # sites sample knots and dust lanes that subtract worse than the transient's
+    # own position, and 10-30 sites give a noisy scatter, so the full value
+    # overstates the error: on SN 2026abgb (20 frames, g and r) 1.0 gave
+    # same-night reduced chi2 0.06-0.11, 0.5 gave 0.2-0.4 and pair differences
+    # of 0.6-1.1 sigma, 0.25 gave 0.6-1.5. 0 keeps it as a diagnostic only
+    # (column diff_host_residual always holds the full, unscaled value).
+    error_scale: 0.5
   # The chi2 above is measured on the bright stars the kernel was fitted to, so
   # it reports that the PSF match worked there -- not that the subtraction is
   # clean on the host. This judges the shape of what is left behind instead. A
@@ -338,12 +377,21 @@ subtraction:
     background_order: 1        # differential background polynomial order
     n_stamps: 40               # bright stars used to solve for the kernel
     stamp_half_px: 20
+    exclude_target_fwhm: 2.0   # target pixels within this x FWHM never enter the kernel fit
     sigma_clip: 3.0
     max_iter: 3
 
 # ------------------------------- outputs -----------------------------------
 output:
   primary_method: auto         # auto | difference_psf | psf | aperture
+  # When every difference measurement of an epoch is flagged and the fallback
+  # would be direct photometry, keep the (flagged) difference instead if the
+  # direct value is brighter than it by more than this: 0.2 mag means the host
+  # supplies 17 per cent of the direct flux, already worse than a difference
+  # that only failed the dipole test. (0.75 let two 2026abgb r epochs through
+  # 0.6-0.7 mag too bright.) Only differences whose kernel solved qualify.
+  # null switches this off.
+  host_guard_mag: 0.2
   write_diagnostics: true
   write_qa_plots: true
   write_stamps: true

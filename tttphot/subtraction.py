@@ -89,7 +89,8 @@ def _polynomial_terms(shape, order: int) -> list[np.ndarray]:
 
 # --------------------------------------------------------------------------
 def _select_stamps(science: np.ndarray, mask: np.ndarray, fwhm_px: float,
-                   n_stamps: int, half: int) -> list[tuple[int, int]]:
+                   n_stamps: int, half: int, avoid_xy=None,
+                   avoid_radius: float = 0.0) -> list[tuple[int, int]]:
     """Positions of bright, isolated, unsaturated sources to fit the kernel on."""
     from photutils.detection import DAOStarFinder
 
@@ -119,6 +120,9 @@ def _select_stamps(science: np.ndarray, mask: np.ndarray, fwhm_px: float,
             continue
         if float(row["peak"]) > 0.9 * peak_limit:
             continue
+        if avoid_xy is not None and np.hypot(float(row["xcentroid"]) - avoid_xy[0],
+                                             float(row["ycentroid"]) - avoid_xy[1]) < avoid_radius:
+            continue                        # the transient itself, or a knot right on it
         if any(abs(x - px) < half and abs(y - py) < half for px, py in picks):
             continue
         if np.nanmax(science[y - half:y + half + 1, x - half:x + half + 1]) <= 0:
@@ -130,7 +134,8 @@ def _select_stamps(science: np.ndarray, mask: np.ndarray, fwhm_px: float,
 
 
 def solve_kernel(science: np.ndarray, reference: np.ndarray, mask: np.ndarray,
-                 fwhm_px: float, cfg) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
+                 fwhm_px: float, cfg,
+                 exclude_xy: Optional[tuple] = None) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
     """Least-squares PSF matching taking *reference* into *science*.
 
     The kernel may vary over the stamp: each basis function is multiplied by a
@@ -178,7 +183,28 @@ def solve_kernel(science: np.ndarray, reference: np.ndarray, mask: np.ndarray,
     n_kernel_columns = len(columns)
     columns.extend(bkg_terms)
 
-    picks = _select_stamps(science, mask, fwhm_px, n_stamps, stamp_half)
+    # The transient must never inform the kernel. It is in the science frame and
+    # not in the reference, so a stamp on it asks the kernel to conjure its flux
+    # out of the host: the solve tilts (a kernel centroid of 0.9 px on one
+    # SN 2026abgb frame) and the matched host is over-subtracted exactly where
+    # the supernova is measured. It sits on a bright host, so the star finder
+    # happily picks it: on every 2026abgb frame a stamp landed within 1 px of
+    # it. Keep every stamp, and every fitted pixel, clear of it by a stamp's
+    # half-width plus a few FWHM.
+    exclusion = None
+    radius = 0.0
+    if exclude_xy is not None and all(np.isfinite(exclude_xy)):
+        radius = float(cfg.get("subtraction.kernel.exclude_target_fwhm", 2.0)) * float(fwhm_px)
+        yy_e, xx_e = np.mgrid[0:science.shape[0], 0:science.shape[1]]
+        exclusion = np.hypot(xx_e - float(exclude_xy[0]), yy_e - float(exclude_xy[1])) < radius
+    # Only the transient's own pixels are kept out. Rejecting every stamp that
+    # overlaps it (a disc of stamp_half + 3 FWHM) was tried and was worse: on
+    # SN 2026abgb it also threw out the host nucleus and nearby knots, and the
+    # kernel sums scattered by 5 per cent about the zero-point prediction
+    # instead of 1-2.
+    picks = _select_stamps(science, mask, fwhm_px, n_stamps, stamp_half,
+                           avoid_xy=exclude_xy if exclusion is not None else None,
+                           avoid_radius=radius)
     fit_mask = np.zeros(science.shape, dtype=bool)
     if picks:
         for x, y in picks:
@@ -188,6 +214,8 @@ def solve_kernel(science: np.ndarray, reference: np.ndarray, mask: np.ndarray,
         fit_mask[:] = True
 
     fit_mask &= ~mask
+    if exclusion is not None:
+        fit_mask &= ~exclusion
     fit_mask &= np.isfinite(science) & np.isfinite(reference)
     # Never let the edges, where the convolution is incomplete, drive the fit.
     fit_mask[:half + 1, :] = False
@@ -230,7 +258,13 @@ def solve_kernel(science: np.ndarray, reference: np.ndarray, mask: np.ndarray,
     )
 
     residual = science[keep] - model[keep]
+    yk, xk = np.mgrid[:kernel_centre.shape[0], :kernel_centre.shape[1]]
+    ksum = float(kernel_centre.sum())
+    kc = kernel_centre.shape[0] // 2
     info = {
+        "kernel_dx": float(((xk - kc) * kernel_centre).sum() / ksum) if ksum else float("nan"),
+        "kernel_dy": float(((yk - kc) * kernel_centre).sum() / ksum) if ksum else float("nan"),
+        "target_excluded": exclusion is not None,
         "n_stamps": len(picks),
         "n_pixels": int(keep.sum()),
         "n_basis": len(basis),
@@ -327,9 +361,11 @@ def subtract(image, reference, cfg, coord: SkyCoord,
 
     work_mask = mask | ~np.isfinite(science_fit) | ~np.isfinite(reference_fit)
     try:
+        target_xy = tuple(float(v) for v in stamp_wcs.world_to_pixel(coord))
         matched, kernel, background, info = solve_kernel(
             np.nan_to_num(science_fit), np.nan_to_num(reference_fit), work_mask,
-            fwhm_px if mode == "convolve_reference" else max(ref_fwhm, fwhm_px), cfg)
+            fwhm_px if mode == "convolve_reference" else max(ref_fwhm, fwhm_px), cfg,
+            exclude_xy=target_xy)
     except Exception as exc:
         empty.message = f"kernel solution failed: {exc}"
         log.warning("%s: %s", image.meta.path.name, empty.message)

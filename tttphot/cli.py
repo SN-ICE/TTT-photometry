@@ -227,7 +227,9 @@ def cmd_recalibrate(args) -> int:
         shutil.copy2(table, backup)
         print(f"\nkept the original as {backup.name}")
 
-    frame = lc.reselect_primary(frame, str(cfg.get("output.primary_method", "auto")))
+    from .pipeline import _host_guard
+    frame = lc.reselect_primary(frame, str(cfg.get("output.primary_method", "auto")),
+                                _host_guard(cfg))
     frame.to_csv(table, index=False, float_format="%.6f")
     slim_path = outdir / f"{args.target}_lightcurve.csv"
     primary = frame[frame["primary"].astype(bool)]
@@ -320,8 +322,13 @@ def cmd_resolve(args) -> int:
     found = nameresolve.resolve(args.target, cfg, sources=sources)
     if found is None:
         print(f"could not resolve {args.target}")
-        print("TNS needs a bot key: set tns.api_key / tns.bot_id / tns.bot_name in a "
-              "config file, or export TNS_API_KEY / TNS_BOT_ID / TNS_BOT_NAME.")
+        if nameresolve._tns_credentials(cfg) is None:
+            print("TNS needs a bot key: put tns.api_key / tns.bot_id / tns.bot_name in "
+                  "config/tns.yaml (see config/tns.yaml.example), or export "
+                  "TNS_API_KEY / TNS_BOT_ID / TNS_BOT_NAME.")
+        else:
+            print("TNS credentials were found (config/tns.yaml); the warning above says "
+                  "why the lookup failed.")
         return 1
 
     print(found.describe())

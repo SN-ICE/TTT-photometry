@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Optional
 
 import numpy as np
+from astropy.stats import sigma_clipped_stats
 from astropy.modeling import fitting, models
 from astropy.table import Table
 from photutils.detection import DAOStarFinder
@@ -196,8 +197,18 @@ def measure_fwhm(image, cfg, sources: Optional[Table] = None) -> float:
     if sources is None:
         sources = detect_sources(image, cfg, fwhm_px=fwhm_guess)
 
+    # Iterate detection and fitting, but do not simply keep the last answer.
+    # Re-detecting with a *smaller* kernel can cut the sample to a handful of
+    # sources dominated by blends and galaxies: on a 1.1" TTT3 frame the first
+    # pass gave 3.81 px from 27 stars (10-90 per cent range 3.73-3.91) and the
+    # second 5.29 px from 10 sources ranging 3.7-13.4. Keeping that second
+    # value made every real star look 28 per cent too sharp to the profile
+    # test, which then rejected all but two of them, leaving no empirical PSF
+    # and a one-star aperture correction off by 0.4 mag. So each pass uses a
+    # clipped median, and the pass with the most fitted stars wins.
     fwhm = fwhm_guess
-    for iteration in range(2):
+    best = None                                   # (n_values, fwhm, scatter)
+    for iteration in range(3):
         stars = select_psf_stars(image, sources, cfg, fwhm, max_stars=max_stars, min_snr=10.0)
         half = int(np.ceil(3.0 * fwhm))
         values = []
@@ -214,22 +225,31 @@ def measure_fwhm(image, cfg, sources: Optional[Table] = None) -> float:
             if value is not None and fwhm_min <= value <= fwhm_max:
                 values.append(value)
 
-        if len(values) >= min_stars:
-            new_fwhm = float(np.median(values))
-        elif values:
-            new_fwhm = float(np.median(values))
-            log.warning("%s: FWHM from only %d stars", image.meta.path.name, len(values))
-        else:
-            log.warning("%s: FWHM measurement failed; keeping %.2f px", image.meta.path.name, fwhm)
+        if not values:
+            if best is None:
+                log.warning("%s: FWHM measurement failed; keeping %.2f px",
+                            image.meta.path.name, fwhm)
             break
+        if len(values) >= 3:
+            _, new_fwhm, scatter = sigma_clipped_stats(np.asarray(values), sigma=2.5, maxiters=5)
+        else:
+            new_fwhm, scatter = float(np.median(values)), float(np.std(values))
+        new_fwhm = float(new_fwhm)
+        if best is None or len(values) > best[0]:
+            best = (len(values), new_fwhm, float(scatter))
 
         converged = abs(new_fwhm - fwhm) / max(fwhm, 1e-6) < 0.05
         fwhm = new_fwhm
-        image.qa["fwhm_nstars"] = len(values)
-        image.qa["fwhm_scatter_px"] = float(np.std(values)) if values else float("nan")
-        if converged and iteration >= 0:
+        if converged:
             break
         sources = detect_sources(image, cfg, fwhm_px=fwhm)
+
+    if best is not None:
+        if best[0] < min_stars:
+            log.warning("%s: FWHM from only %d stars", image.meta.path.name, best[0])
+        fwhm = best[1]
+        image.qa["fwhm_nstars"] = best[0]
+        image.qa["fwhm_scatter_px"] = best[2]
 
     fwhm = float(np.clip(fwhm, fwhm_min, fwhm_max))
     image.fwhm_px = fwhm

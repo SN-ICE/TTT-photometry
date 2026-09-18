@@ -200,3 +200,77 @@ def assess(diff, positions, fwhm_px: float, cfg,
     else:
         q.verdict = "pass"
     return q
+
+
+def host_residual(difference: np.ndarray, matched: np.ndarray, target_xy, fwhm_px: float,
+                  cfg, noise_per_aperture: float = float("nan")) -> dict:
+    """How well the host was subtracted *around* the transient, as a flux error.
+
+    The photon-noise error of a difference measurement says nothing about how
+    well the galaxy under the transient was removed. On a bright host in poor
+    seeing that is the dominant error: on SN 2026abgb in 2.0-2.6" seeing the
+    residual flux left in apertures elsewhere on the host was 4-30 per cent of
+    the supernova's, while the quoted errors were 1-2 per cent, and four frames
+    of one night spread over 0.15 mag.
+
+    So place the science aperture at many positions near the transient where
+    the matched reference has a similar surface brightness (within
+    ``subtraction.host_residual.sb_range`` of the host's at the transient, whose
+    level is taken from an annulus around it so the transient does not count),
+    sum the difference in each, and take the robust scatter. The noise those
+    sums would show anyway (*noise_per_aperture*) is removed in quadrature, so
+    on a faint host the term goes to zero rather than double-counting the sky.
+
+    Returns ``{"sigma": flux, "n": sites, "median": flux, "host_sb": per-pixel}``;
+    sigma is 0 when the host is too faint to matter or there are too few sites.
+    """
+    out = {"sigma": 0.0, "n": 0, "median": float("nan"), "host_sb": float("nan")}
+    if not bool(cfg.get("subtraction.host_residual.enabled", True)):
+        return out
+    try:
+        from photutils.aperture import CircularAnnulus, CircularAperture, aperture_photometry
+    except Exception:  # pragma: no cover
+        return out
+    D = np.asarray(difference, dtype=float)
+    M = np.asarray(matched, dtype=float)
+    if D.shape != M.shape or target_xy is None or not np.all(np.isfinite(target_xy)):
+        return out
+    x0, y0 = float(target_xy[0]), float(target_xy[1])
+    fwhm = float(fwhm_px)
+    radius = float(cfg.get("photometry.aperture_scale", 1.2)) * fwhm
+    lo, hi = cfg.get("subtraction.host_residual.sb_range", [0.5, 2.0])
+    reach = float(cfg.get("subtraction.host_residual.radius_fwhm", 15.0)) * fwhm
+    avoid = float(cfg.get("subtraction.host_residual.avoid_fwhm", 3.0)) * fwhm
+    min_sites = int(cfg.get("subtraction.host_residual.min_sites", 8))
+
+    Mf = np.nan_to_num(M)
+    ring = CircularAnnulus((x0, y0), r_in=1.5 * fwhm, r_out=2.5 * fwhm)
+    host_sb = float(aperture_photometry(Mf, ring)["aperture_sum"][0]) / ring.area
+    out["host_sb"] = host_sb
+    sky = _noise(M)
+    if not np.isfinite(host_sb) or host_sb <= 0 or not np.isfinite(sky) or host_sb < 3.0 * sky:
+        return out                          # no significant host under the transient
+
+    step = max(1.5 * radius, 2.0)
+    grid = np.arange(-reach, reach + step, step)
+    xs, ys = np.meshgrid(x0 + grid, y0 + grid)
+    xs, ys = xs.ravel(), ys.ravel()
+    ny, nx = D.shape
+    keep = ((np.hypot(xs - x0, ys - y0) > avoid) & (np.hypot(xs - x0, ys - y0) <= reach)
+            & (xs > radius + 1) & (ys > radius + 1) & (xs < nx - radius - 2) & (ys < ny - radius - 2))
+    xs, ys = xs[keep], ys[keep]
+    if xs.size < min_sites:
+        return out
+    apertures = CircularAperture(np.column_stack([xs, ys]), r=radius)
+    sb = np.asarray(aperture_photometry(Mf, apertures)["aperture_sum"], float) / apertures.area
+    bad = np.asarray(aperture_photometry((~np.isfinite(D)).astype(float), apertures)["aperture_sum"], float)
+    similar = (sb >= float(lo) * host_sb) & (sb <= float(hi) * host_sb) & (bad < 0.5)
+    if similar.sum() < min_sites:
+        return out
+    sums = np.asarray(aperture_photometry(np.nan_to_num(D), apertures)["aperture_sum"], float)[similar]
+    med = float(np.median(sums))
+    scatter = 1.4826 * float(np.median(np.abs(sums - med)))
+    noise = float(noise_per_aperture) if np.isfinite(noise_per_aperture) else 0.0
+    out.update(sigma=float(np.sqrt(max(scatter ** 2 - noise ** 2, 0.0))),
+               n=int(similar.sum()), median=med)
+    return out

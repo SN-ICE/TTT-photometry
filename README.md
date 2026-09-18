@@ -10,8 +10,9 @@ It is a port of **tjophot**, the TJO pipeline (`~/Desktop/TJO/pipeline`), and
 keeps its whole method -- aperture and empirical-PSF photometry, Alard & Lupton
 difference imaging, Gaia DR3 synthetic-photometry zero points, empirical depth
 and errors, the same quality flags and the same output tables. What changed is
-everything that knows about the telescope. Currently configured for **TTT3
-(2 m) + QHY600M**; other TTT cameras are one YAML file each.
+everything that knows about the telescope. Configured for the three cameras
+the observatory has used on 2026abgb: **TTT3 + QHY600M**, **TTT3 + iKon-L 936**
+and **TTT4 + QHY600M**, all 2 m; another camera is one YAML file.
 
 `snname` below stands for the target's name. TTT writes the bare TNS
 designation into `OBJECT` (`2026abgb`); the pipeline accepts `SN2026abgb`,
@@ -63,7 +64,7 @@ frames, and faster, since no headers need reading.
 
 | | TJO (tjophot) | TTT (tttphot) |
 |---|---|---|
-| instrument file | `tjo_meia2/3.yaml` | `config/instruments/ttt3_qhy600.yaml` |
+| instrument files | `tjo_meia2/3.yaml` | `ttt3_qhy600.yaml` (TTT3 and TTT4 QHY600), `ttt_ikon936.yaml` |
 | filters | `SDSS g`, `B`, ... | `SDSSg`, `SDSSr`, ... (Johnson spellings mapped too) |
 | gain, read noise | per binned pixel in the header | header quotes the **unbinned** sensor; converted, see below |
 | target position | `OBJRA/OBJDEC` | none in the header (`RA/DEC` is the frame centre) -- TNS/SIMBAD, or `targets/snname.yaml` |
@@ -115,6 +116,77 @@ band, not zero: the definitions differ (tttphot's ZP is for aperture-corrected
 counts against Gaia synthetic photometry). A frame where that difference jumps
 is worth a look. Their FWHM estimator also runs ~15 per cent below tttphot's
 Gaussian-fit FWHM (2.5" against 3.0" on the test frame).
+
+### Mixed cameras
+
+The observatory takes a QHY600 set and an iKon936 set of the same target a few
+minutes apart, and TTT4 adds a second QHY600. The pipeline measures every frame
+on its own and never assumes two cameras agree, but four places compared
+frames with each other and had to become camera-aware. The first one is why a
+first run of 2026abgb showed the QHY600 and iKon936 epochs of the same night
+1.5 mag apart:
+
+- **Kernel-sum check.** A difference whose kernel sum is far from the band's
+  median is flagged as a failed subtraction. The raw sum scales with each
+  camera's ADU per photon and pixel size (0.12-0.17 for the QHY600 in g,
+  0.78-0.92 for the iKon936), so every frame of the minority camera was
+  flagged, and those epochs fell back to direct photometry -- on the host,
+  1.5 mag too bright. The sums are now divided by exposure time,
+  10^(0.4 ZP) and pixel area first; after that the three cameras' medians
+  agree to 3 per cent and single epochs to 10 (a `convolve_science` kernel is
+  inverted before comparing).
+- **Zero-point transfer** between bands of the same night is done per camera
+  (their zero points differ by 1.4 mag in the same band).
+- **`ttt_stack` templates** use one detector configuration only.
+- **Instrument files** are chosen per frame from `INSTRUME`.
+
+Two more changes came out of the same run, and apply to every camera:
+
+- **Template registration.** The Pan-STARRS stack cutout sat 0.26" off Gaia
+  (the PS1 *catalogue* agrees with Gaia to 20 mas), while every TTT frame is
+  re-centred on Gaia. The reference WCS is now registered on the same
+  catalogue before differencing (`subtraction.register_reference`).
+- **Host guard.** If every difference measurement of an epoch is flagged and
+  the fallback would be direct photometry that is more than 0.2 mag brighter,
+  the flagged difference is kept instead (`output.host_guard_mag`).
+
+And two that only showed on the TTT3 QHY600 in good seeing:
+
+- **Elongated stars.** On 2026-09-12 (seeing ~1") its stars are about twice as
+  wide along the detector columns as along the rows (2.6 against 5.5 px FWHM);
+  the iKon936 on the same telescope and the TTT4 QHY600 are round. With the
+  TJO roundness limits only 7 of 78 Gaia stars were detected and the frame lost
+  its astrometry and calibration; `detection.roundlo/roundhi` are now +-1.5.
+  Worth mentioning to the observatory.
+- **Seeing measurement** kept the last of its iterations even when that pass
+  was based on a handful of blends (5.3 px instead of 3.8 px), which then made
+  the PSF-star profile test reject real stars. It now keeps the pass with the
+  most stars.
+
+### Errors on a bright host
+
+The error of a difference measurement used to be photon noise only, which says
+nothing about how well the galaxy under the transient was removed. On
+2026abgb (12" from the nucleus of NGC 7673) in 2.0-2.6" seeing the host inside
+the aperture is 2-4 times the supernova, and four r frames of one night
+scattered by 0.06 mag against quoted errors of 0.013-0.021 (reduced chi2 10).
+Two changes:
+
+- **Host-residual error.** The science aperture is laid on sites near the
+  transient where the matched reference is about as bright as at the
+  transient; the robust scatter of the difference flux there, less the sky
+  noise, is `diff_host_residual` (as a fraction of the transient's flux). Half
+  of it (`subtraction.host_residual.error_scale`) is added to `mag_err`. It is
+  1-3 per cent in ~1" seeing and 4-30 per cent in 2-3". It widens the error
+  bar only: `flux_err` and `snr` stay statistical, so a clear detection is
+  never turned into a limit by it, and the systematic part is in
+  `flux_err_sys`.
+- **The transient is kept out of the kernel fit.** It was often picked as a
+  kernel stamp. Sigma clipping removed most of it, but injected sources came
+  back 1-3 per cent faint; its pixels within 2 FWHM
+  (`subtraction.kernel.exclude_target_fwhm`) are now excluded. Only those
+  pixels: rejecting every stamp near it also threw out the host nucleus, and
+  the kernel sums then scattered by 5 per cent instead of 1-2.
 
 ### Bad pixels
 
@@ -199,10 +271,14 @@ See `docs/VALIDATION.md`. In short: offline, on the real 2026abgb frame, stars
 injected on the host galaxy and recovered through the full `tttphot run`
 (template, kernel, calibration, both difference methods) come back within
 0.03 mag at g = 17.5-18.5 and within 1.3 sigma at 19.5-20.5, while direct
-photometry at the same spot is 2.5-5.7 mag too bright from the host. **Not yet
-done: a live run with Gaia and Pan-STARRS**, which could not be reached from the
-machine this was built on. Run `./full-run.sh SN2026abgb` and compare `zp`
-with `obs_zp` as a first check.
+photometry at the same spot is 2.5-5.7 mag too bright from the host.
+
+On the real 2026abgb g frames from all three cameras (with the Gaia catalogues
+and PS1 template cached by a live run), same-night epochs from different
+cameras agree to 0.02-0.03 mag, and `zp - obs_zp` is +0.05 +- 0.02 mag for
+every frame of every camera. With the host-residual term, same-night r and g
+frames in 1-3" seeing agree to within their errors (reduced chi2 0.2-1.1,
+from 1.7-15 before).
 
 ```bash
 python tests/selftest_injection.py ~/Desktop/TTT/<a frame>.fits   # offline, ~2 min

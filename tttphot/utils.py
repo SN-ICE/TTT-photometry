@@ -187,3 +187,42 @@ def odd(n: int) -> int:
     if n % 2 == 0:
         n += 1
     return max(3, n)
+
+
+# TNS name prefixes. A transient is registered as AT and renamed SN (or TDE,
+# ...) once classified, so the same object turns up under either.
+TNS_PREFIXES = ("sn", "at", "tde", "kn", "frb", "lrn", "ilrt", "ln", "sne")
+
+
+def normalise_name(name) -> str:
+    """Comparable form of a transient name.
+
+    'SN 2026abgb', 'SN2026abgb', 'AT2026abgb', 'AT 2026abgb', '2026abgb' and
+    'sn_2026abgb' all become '2026abgb'. Anything that is not a TNS-style
+    designation is returned lower-cased with spaces, '_' and '-' removed.
+    """
+    text = re.sub(r"[\s_\-]+", "", str(name or "")).lower()
+    match = re.match(r"^(?:" + "|".join(TNS_PREFIXES) + r")?((?:19|20)\d{2}[a-z]{1,4})$", text)
+    return match.group(1) if match else text
+
+
+def find_by_designation(directory, name, suffixes=(".yaml", ".yml")):
+    """The file in *directory* for *name*, whatever prefix either one carries.
+
+    Exact name first (``SN2026abwp.yaml`` for SN2026abwp); failing that, any
+    file whose stem is the same designation (``AT2026abwp.yaml``,
+    ``2026abwp.yaml``). None if there is none; the first match, sorted, if
+    several.
+    """
+    directory = Path(directory)
+    for suffix in suffixes:
+        exact = directory / f"{name}{suffix}"
+        if exact.exists():
+            return exact
+    wanted = normalise_name(name)
+    if not wanted or not directory.is_dir():
+        return None
+    matches = sorted(p for p in directory.iterdir()
+                     if p.suffix in suffixes and normalise_name(p.stem) == wanted)
+    return matches[0] if matches else None
+
