@@ -39,7 +39,7 @@ from .calibration import ZeroPoint, calibrate_image
 from .detection import detect_sources, filter_by_profile, measure_fwhm, select_psf_stars
 from .image import ScienceImage
 from .utils import (UserError, edge_margin_px, ensure_dir, first_header_value,
-                    get_logger, slugify)
+                    get_logger, header_mjd, slugify)
 
 log = get_logger("tttphot.pipeline")
 
@@ -76,10 +76,10 @@ def index_images(paths: Iterable[Path], instrument: dict,
         filters = this.get("filters", {})
         raw = str(first_header_value(header, hmap.get("filter", ["FILTER"]), "")).strip()
         band = filters.get(raw, filters.get(raw.replace("SDSS ", ""), raw))
-        mjd = first_header_value(header, hmap.get("mjd", ["MJD-OBS"]))
-        if mjd is None:
-            jd = first_header_value(header, hmap.get("jd", ["JD"]))
-            mjd = float(jd) - 2400000.5 if jd is not None else float("nan")
+        mjd = header_mjd(header, hmap)
+        if not np.isfinite(mjd):
+            log.warning("%s carries no usable date (no MJD-OBS, JD or DATE-OBS); "
+                        "it will sort and group as if it had no epoch", path.name)
         name = str(first_header_value(header, hmap.get("object", ["OBJECT"]), "")).strip()
         if target and name and name.lower() != target.lower():
             continue

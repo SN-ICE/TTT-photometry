@@ -107,6 +107,23 @@ def test_flux_to_mag_folds_the_zero_point_error_in_quadrature():
     assert err == pytest.approx(np.hypot(1.0857362 * 0.01, 0.03))
 
 
+def test_header_mjd_prefers_mjd_obs_then_jd_then_date_obs():
+    """Two TTT3 frames of 2026-09-14 carry only DATE-OBS, and came through with
+    a NaN MJD: they sorted to the end of the campaign, their observing night was
+    meaningless, and the epoch reached the light curve with no date on it. The
+    instrument files already mapped the card as `dateobs`; nothing read it."""
+    hmap = {"mjd": ["MJD-OBS"], "jd": ["JD-OBS", "JD"], "dateobs": ["DATE-OBS"]}
+    assert utils.header_mjd({"MJD-OBS": 61297.5}, hmap) == pytest.approx(61297.5)
+    assert utils.header_mjd({"JD-OBS": 2461298.0}, hmap) == pytest.approx(61297.5)
+    only_date = {"DATE-OBS": "2026-09-14T03:27:11.235346"}
+    assert utils.header_mjd(only_date, hmap) == pytest.approx(61297.1438800, abs=1e-5)
+    assert not np.isfinite(utils.header_mjd({"EXPTIME": 120.0}, hmap))
+
+
+def test_header_mjd_survives_an_unreadable_date():
+    assert not np.isfinite(utils.header_mjd({"DATE-OBS": "not a date"}, {}))
+
+
 def test_robust_sigma_is_unmoved_by_an_outlier():
     values = np.concatenate([np.full(99, 5.0), [1e6]])
     assert utils.robust_sigma(values) == pytest.approx(0.0)

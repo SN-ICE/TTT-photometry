@@ -22,6 +22,8 @@ class UserError(Exception):
     """
 
 
+log = logging.getLogger("tttphot.utils")
+
 LOG_FORMAT = "%(asctime)s %(levelname)-7s %(name)-18s %(message)s"
 DATE_FORMAT = "%H:%M:%S"
 
@@ -140,6 +142,38 @@ def slugify(text: str) -> str:
     text = str(text).strip()
     text = re.sub(r"[^\w.+-]+", "_", text)
     return text.strip("_")
+
+
+def header_mjd(header, hmap: Optional[dict] = None) -> float:
+    """Modified Julian Date of an exposure, from whichever card carries it.
+
+    ``MJD-OBS`` first, then ``JD``, then ``DATE-OBS`` -- which the instrument
+    files already map as ``dateobs`` and nothing read. Two TTT3 frames of
+    2026-09-14 carry only that card, and they came through with a NaN MJD: they
+    sort to the end of the campaign, their observing night is meaningless, and
+    the epoch reaches the light curve with no date on it.
+    """
+    hmap = hmap or {}
+    value = first_header_value(header, hmap.get("mjd", ["MJD-OBS"]))
+    if value is not None:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            pass
+    jd = first_header_value(header, hmap.get("jd", ["JD-OBS", "JD"]))
+    if jd is not None:
+        try:
+            return float(jd) - 2400000.5
+        except (TypeError, ValueError):
+            pass
+    date = first_header_value(header, hmap.get("dateobs", ["DATE-OBS", "DATE"]))
+    if date:
+        try:
+            from astropy.time import Time
+            return float(Time(str(date).strip(), scale="utc").mjd)
+        except Exception as exc:
+            log.debug("could not read a date from %r: %s", date, exc)
+    return float("nan")
 
 
 def edge_margin_px(cfg, pixel_scale: float) -> int:

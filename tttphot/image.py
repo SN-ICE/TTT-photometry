@@ -20,7 +20,7 @@ from astropy.wcs.utils import proj_plane_pixel_scales
 import astropy.units as u
 from photutils.background import Background2D, MedianBackground
 
-from .utils import edge_margin_px, first_header_value, get_logger
+from .utils import edge_margin_px, first_header_value, get_logger, header_mjd
 
 log = get_logger("tttphot.image")
 
@@ -157,10 +157,7 @@ class ScienceImage:
             log.warning("filter %r not in the instrument map; using %r", raw_filter, band)
         system = instrument.get("systems", {}).get(band, "ab")
 
-        mjd = first_header_value(header, hmap.get("mjd", ["MJD-OBS"]))
-        if mjd is None:
-            jd = first_header_value(header, hmap.get("jd", ["JD"]))
-            mjd = float(jd) - 2400000.5 if jd is not None else float("nan")
+        mjd = header_mjd(header, hmap)
 
         binning = float(cam_bx * rebin)
 
