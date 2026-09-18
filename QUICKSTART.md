@@ -105,6 +105,11 @@ tttphot run snname --clean
 
 or all of steps 1-4 in one go: `./full-run.sh snname`.
 
+Run it again whenever new frames arrive: only those are measured, the rest are
+left as they are. `--clean` is for starting over, and is what to use after
+changing anything in `config/` or the target file, since the rows already in
+the table were measured with the old settings.
+
 ### 5. First things to check in the output
 
 In `runs/snname/snname_photometry_all.csv`:

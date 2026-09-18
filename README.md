@@ -229,11 +229,11 @@ tttphot list snname -v                 # frames, bands, MJD coverage
 tttphot resolve snname --write         # position from TNS into targets/snname.yaml
 tttphot fetch-catalog snname           # download and cache the catalogues
 tttphot fetch-template snname          # fetch and inspect the reference images
-tttphot run snname                     # the pipeline
-tttphot run snname --clean             # same, removing the previous outputs first
+tttphot run snname                     # the pipeline; measures only what is new
+tttphot run snname --clean             # throw the old photometry away and redo it all
+tttphot run snname --no-resume         # re-measure everything, keep the table
 tttphot run snname --bands g r         # a subset of bands
 tttphot run snname --no-subtraction    # direct photometry only
-tttphot run snname --skip 40 --append  # resume a long run
 tttphot colorterms snname              # fit the instrument colour terms
 tttphot recalibrate snname             # recover failed zero points from other bands
 tttphot clean snname                   # remove outputs (--templates, --catalogs, --all)
@@ -242,6 +242,32 @@ tttphot build-pattern snname           # detector patterns, once there are enoug
 
 Without installing, every command works as `python -m tttphot.cli ...` from
 inside the pipeline directory.
+
+### Re-running as frames arrive
+
+A run measures only the frames that are not already in
+`runs/snname/snname_photometry_all.csv`, so once a campaign is reduced, a night
+of new images costs a night of work rather than the whole campaign again. On
+SN 2026abwp: 55 s for the first pass over twelve frames, 0.7 s when nothing has
+changed, 20 s when four new ones arrive -- and the incremental table is
+identical, column for column, to one built from scratch.
+
+A frame that the observatory has re-reduced since the table was written is
+measured again rather than keeping the old numbers, so replacing a file is
+enough to have it picked up.
+
+Two things this deliberately does *not* do. It does not notice that you changed
+the configuration -- the rows already in the table were measured with the old
+one, and mixing them is worse than either. After editing `config/` or the
+target file, use `--clean` (or `tttphot clean snname`), which is also what
+`./full-run.sh snname --clean` now does. And it does not re-derive the target
+position: a resumed run keeps the one the first run adopted, recorded in
+`run_summary.json`, because the centroid refinement samples whatever epochs
+exist and would otherwise move the position slightly every time a night is
+added, leaving one table measured at several places.
+
+`--no-resume` measures everything again without discarding the table, which is
+what to use when the code has changed but the configuration has not.
 
 ---
 

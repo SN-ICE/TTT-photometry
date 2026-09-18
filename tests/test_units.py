@@ -13,6 +13,9 @@ and each of those says so.
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import astropy.units as u
 import numpy as np
 import pandas as pd
 import pytest
@@ -676,6 +679,124 @@ def test_reselect_primary_marks_exactly_one_row_per_image():
     assert out.groupby("image")["primary"].sum().tolist() == [1, 1]
     chosen = out[out["primary"] & (out["image"] == "a.fits")].iloc[0]
     assert chosen["method"] == "difference_psf"
+
+
+# ---------------------------------------------------------------------------
+# resuming a run
+# ---------------------------------------------------------------------------
+def _epoch(path, band="g", mjd=61300.0):
+    from tttphot.pipeline import EpochIndex
+
+    return EpochIndex(path=Path(path), mjd=mjd, band=band, object_name="SN2026abwp",
+                      exptime=120.0)
+
+
+def _write_table(outdir, target, names):
+    frame = lc.to_frame([lc.new_row(image=n, method="aperture", band="g",
+                                    mjd=61300.0 + i, mag=19.0)
+                         for i, n in enumerate(names)])
+    path = Path(outdir) / f"{target}_photometry_all.csv"
+    frame.to_csv(path, index=False)
+    return path
+
+
+def test_previous_run_reads_back_what_was_measured(tmp_path):
+    from tttphot.pipeline import previous_run
+
+    _write_table(tmp_path, "SN2026abwp", ["a.fits", "b.fits"])
+    table, measured, written_at = previous_run(tmp_path, "SN2026abwp")
+    assert measured == {"a.fits", "b.fits"}
+    assert len(table) == 2
+    assert written_at > 0
+
+
+def test_previous_run_on_a_fresh_target(tmp_path):
+    from tttphot.pipeline import previous_run
+
+    assert previous_run(tmp_path, "SN2026abwp") == (None, set(), 0.0)
+
+
+def test_previous_run_survives_a_truncated_table(tmp_path):
+    """A half-written table must mean "measure everything", not crash."""
+    from tttphot.pipeline import previous_run
+
+    (tmp_path / "SN2026abwp_photometry_all.csv").write_text("")
+    assert previous_run(tmp_path, "SN2026abwp")[1] == set()
+
+
+def test_previous_run_ignores_a_table_with_no_image_column(tmp_path):
+    from tttphot.pipeline import previous_run
+
+    (tmp_path / "SN2026abwp_photometry_all.csv").write_text("mjd,mag\n61300.0,19.0\n")
+    assert previous_run(tmp_path, "SN2026abwp") == (None, set(), 0.0)
+
+
+def test_pending_epochs_skips_what_is_already_done(tmp_path):
+    from tttphot.pipeline import pending_epochs
+
+    for name in ("a.fits", "b.fits", "c.fits"):
+        (tmp_path / name).write_text("x")
+    written_at = max((tmp_path / n).stat().st_mtime for n in ("a.fits", "b.fits")) + 10
+    index = [_epoch(tmp_path / n) for n in ("a.fits", "b.fits", "c.fits")]
+    todo, skipped, changed = pending_epochs(index, {"a.fits", "b.fits"}, written_at)
+    assert [e.path.name for e in todo] == ["c.fits"]
+    assert skipped == 2
+    assert changed == []
+
+
+def test_pending_epochs_remeasures_a_frame_the_observatory_re_reduced(tmp_path):
+    """A frame that changed on disk since the table was written is not done.
+
+    Otherwise a re-reduction would silently keep the numbers measured from the
+    version that no longer exists.
+    """
+    import os
+    from tttphot.pipeline import pending_epochs
+
+    old = tmp_path / "old.fits"
+    fresh = tmp_path / "fresh.fits"
+    old.write_text("x")
+    fresh.write_text("x")
+    written_at = old.stat().st_mtime + 10
+    os.utime(fresh, (written_at + 100, written_at + 100))   # re-reduced since
+
+    index = [_epoch(old), _epoch(fresh)]
+    todo, skipped, changed = pending_epochs(index, {"old.fits", "fresh.fits"}, written_at)
+    assert [e.path.name for e in todo] == ["fresh.fits"]
+    assert skipped == 1
+    assert changed == ["fresh.fits"]
+
+
+def test_pending_epochs_does_everything_when_there_is_no_table(tmp_path):
+    from tttphot.pipeline import pending_epochs
+
+    index = [_epoch(tmp_path / "a.fits"), _epoch(tmp_path / "b.fits")]
+    todo, skipped, changed = pending_epochs(index, set(), 0.0)
+    assert len(todo) == 2 and skipped == 0 and changed == []
+
+
+def test_previous_coord_is_read_back_so_a_resumed_run_keeps_the_position(tmp_path):
+    """The centroid refinement samples whatever epochs exist, so re-deriving the
+    position on a resumed run would put the new rows a fraction of an arcsecond
+    from the old ones in the same table."""
+    import json
+    from astropy.coordinates import SkyCoord
+    from tttphot.pipeline import previous_coord
+
+    original = SkyCoord(61.8617875 * u.deg, 1.7614889 * u.deg)
+    (tmp_path / "run_summary.json").write_text(json.dumps(
+        {"coord": original.to_string("hmsdms", precision=3)}))
+    back = previous_coord(tmp_path, "SN2026abwp")
+    assert back is not None
+    assert original.separation(back).arcsec < 0.01
+
+
+def test_previous_coord_is_none_without_a_summary(tmp_path):
+    from tttphot.pipeline import previous_coord
+
+    assert previous_coord(tmp_path, "SN2026abwp") is None
+    (tmp_path / "run_summary.json").write_text("{}")
+    assert previous_coord(tmp_path, "SN2026abwp") is None
 
 
 # ---------------------------------------------------------------------------

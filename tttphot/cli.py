@@ -70,7 +70,8 @@ def cmd_run(args) -> int:
     setup_logging(args.log_level, logfile=outdir / "run.log")
     result = pipeline.run(cfg, args.target, bands=args.bands, max_images=args.max_images,
                           refresh=args.refresh, skip_subtraction=args.no_subtraction,
-                          append=args.append, skip=args.skip)
+                          append=args.append, skip=args.skip,
+                          resume=not getattr(args, "no_resume", False))
     print(f"outputs in {result['outdir']}")
     return 0
 
@@ -863,10 +864,17 @@ def main(argv=None) -> int:
     run_parser = sub.add_parser("run", help="measure a light curve")
     _add_common(run_parser)
     run_parser.add_argument("--clean", action="store_true",
-                            help="delete this target's previous outputs before starting")
+                            help="delete this target's previous outputs and measure "
+                                 "everything from scratch. Use after changing the "
+                                 "configuration, which the existing rows were not "
+                                 "measured with")
+    run_parser.add_argument("--no-resume", action="store_true",
+                            help="measure every frame again, even ones an earlier run "
+                                 "already did, and merge the results. Without this a run "
+                                 "only measures what is new")
     run_parser.add_argument("--max-images", type=int, default=None)
     run_parser.add_argument("--skip", type=int, default=0,
-                            help="skip the first N epochs (resume a long run with --append)")
+                            help="ignore the first N epochs entirely")
     run_parser.add_argument("--no-subtraction", action="store_true",
                             help="skip difference imaging")
     run_parser.add_argument("--no-astrometry", action="store_true",

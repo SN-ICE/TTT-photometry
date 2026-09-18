@@ -853,6 +853,73 @@ def _photometry_row(common: dict, method: str, flux: float, flux_err: float,
 
 
 # --------------------------------------------------------------------------
+# resuming a run
+# --------------------------------------------------------------------------
+def previous_run(outdir: Path, target: str):
+    """What an earlier run of this target left behind.
+
+    Returns ``(table, measured, written_at)``: the photometry table, the set of
+    image names in it, and when it was written. ``(None, set(), 0.0)`` when
+    there is nothing to resume from.
+    """
+    path = Path(outdir) / f"{target}_photometry_all.csv"
+    if not path.exists():
+        return None, set(), 0.0
+    try:
+        table = pd.read_csv(path)
+    except Exception as exc:
+        log.warning("could not read %s (%s); measuring every frame", path.name, exc)
+        return None, set(), 0.0
+    if "image" not in table.columns or table.empty:
+        return None, set(), 0.0
+    measured = {str(name) for name in table["image"].dropna()}
+    return table, measured, path.stat().st_mtime
+
+
+def pending_epochs(index: Sequence[EpochIndex], measured: set, written_at: float):
+    """The epochs that still need measuring, and why the others do not.
+
+    A frame is done when the previous table already holds it *and* the file has
+    not been touched since that table was written -- so a frame the observatory
+    re-reduces is measured again rather than silently keeping the old numbers.
+    """
+    todo, skipped, changed = [], 0, []
+    for entry in index:
+        if entry.path.name not in measured:
+            todo.append(entry)
+            continue
+        try:
+            touched = entry.path.stat().st_mtime > written_at
+        except OSError:
+            touched = False
+        if touched:
+            changed.append(entry.path.name)
+            todo.append(entry)
+        else:
+            skipped += 1
+    return todo, skipped, changed
+
+
+def previous_coord(outdir: Path, target: str):
+    """The sky position an earlier run adopted, so a resumed run keeps it.
+
+    Without this an incremental run re-resolves and re-centroids the target, and
+    the refinement samples whatever epochs happen to exist now -- so the new
+    rows would be measured a fraction of an arcsecond away from the old ones, in
+    the same table, for no reason the light curve could show.
+    """
+    path = Path(outdir) / "run_summary.json"
+    if not path.exists():
+        return None
+    try:
+        with open(path) as fh:
+            text = json.load(fh).get("coord")
+        return SkyCoord(str(text), unit=(u.hourangle, u.deg)) if text else None
+    except Exception:
+        return None
+
+
+# --------------------------------------------------------------------------
 def _host_guard(cfg):
     """``output.host_guard_mag`` as a float, or None when switched off."""
     value = cfg.get("output.host_guard_mag", lc.HOST_GUARD_MAG)
@@ -1007,8 +1074,17 @@ def _flag_collapsed_kernels(frame, cfg):
 def run(cfg, target: str, bands: Optional[Sequence[str]] = None,
         max_images: Optional[int] = None, refresh: bool = False,
         skip_subtraction: bool = False, append: bool = False,
-        skip: int = 0) -> dict:
-    """Full pipeline for one target. Returns a dict of output paths."""
+        skip: int = 0, resume: Optional[bool] = None) -> dict:
+    """Full pipeline for one target. Returns a dict of output paths.
+
+    By default the run picks up where the last one left off: frames already in
+    ``<target>_photometry_all.csv`` are left alone and only the new ones are
+    measured, so a night's worth of new images costs a night's worth of work
+    rather than the whole campaign. ``resume=False`` (``--no-resume``) measures
+    everything again and merges; ``tttphot clean`` or ``--clean`` removes the
+    outputs so there is nothing to resume from, which is what to use after
+    changing anything in the configuration that the old rows were measured with.
+    """
     started = time.time()
     instrument = cfg.get("instrument_config", {})
     outdir = ensure_dir(Path(cfg.work_root) / target)
@@ -1032,7 +1108,38 @@ def run(cfg, target: str, bands: Optional[Sequence[str]] = None,
     log.info("%s: %d images, bands %s, MJD %.3f-%.3f", target, len(index), ",".join(present),
              min(e.mjd for e in index), max(e.mjd for e in index))
 
+    # -- what an earlier run already did -----------------------------------
+    if resume is None:
+        resume = bool(cfg.get("output.resume", True))
+    existing, measured, written_at = (None, set(), 0.0)
+    if resume or append:
+        existing, measured, written_at = previous_run(outdir, target)
+    if not resume:
+        measured = set()          # measure everything, but still merge with the old table
+    todo, skipped, changed = pending_epochs(index, measured, written_at)
+    if skipped or changed:
+        log.info("%d of %d frames were measured before and are unchanged; %d to do%s",
+                 skipped, len(index), len(todo),
+                 f", {len(changed)} of them re-reduced since" if changed else "")
+    if not todo and existing is not None:
+        log.info("nothing new to measure. Re-writing the outputs from the existing "
+                 "table; use --no-resume to measure it all again, or 'tttphot clean' "
+                 "if the configuration has changed since.")
+
     coord, explicit = resolve_target_coord(cfg, full_index, instrument)
+
+    # A resumed run must measure the new frames at the same position as the old
+    # ones. Re-resolving is usually harmless, but the centroid refinement samples
+    # whatever epochs exist now, so adding a night would shift the adopted
+    # position by a fraction of an arcsecond -- and old and new rows would sit in
+    # one table measured at two different places.
+    if resume and not explicit and str(cfg.get("target.resolve", "auto")).lower() != "always" \
+            and str(cfg.get("target.refine", "auto")).lower() != "always":
+        earlier = previous_coord(outdir, target)
+        if earlier is not None:
+            log.info("keeping the position the earlier run adopted (%s)",
+                     earlier.to_string("hmsdms", precision=2))
+            coord, explicit = earlier, True
 
     mode = str(cfg.get("target.resolve", "auto")).lower()
     if mode == "always" or (mode == "auto" and not explicit):
@@ -1084,7 +1191,7 @@ def run(cfg, target: str, bands: Optional[Sequence[str]] = None,
     log.info("SN position: %s", coord.to_string("hmsdms", precision=2))
 
     references: dict = {}
-    if bool(cfg.get("subtraction.enabled", True)) and not skip_subtraction:
+    if todo and bool(cfg.get("subtraction.enabled", True)) and not skip_subtraction:
         references = build_references(cfg, full_index, instrument, coord, target, cache_root,
                                       present, refresh=refresh, patterns=patterns,
                                       astrometry_ref=astrometry_ref,
@@ -1092,8 +1199,8 @@ def run(cfg, target: str, bands: Optional[Sequence[str]] = None,
 
     rows: list[dict] = []
     failures: list[dict] = []
-    for k, entry in enumerate(index, 1):
-        log.info("[%d/%d] %s", k, len(index), entry.path.name)
+    for k, entry in enumerate(todo, 1):
+        log.info("[%d/%d] %s", k, len(todo), entry.path.name)
         try:
             image = prepare_image(entry.path, cfg, instrument,
                                   pattern=pattern_for(patterns, entry.band, entry.detector),
@@ -1118,25 +1225,35 @@ def run(cfg, target: str, bands: Optional[Sequence[str]] = None,
         finally:
             image = None
 
-    if not rows:
+    if not rows and existing is None:
         raise UserError("no photometry could be measured")
 
-    frame = lc.to_frame(rows)
+    preference = str(cfg.get("output.primary_method", "auto"))
+
+    # Merge first, then run the campaign-wide steps on the whole table. Both of
+    # them need the campaign to be there: the kernel-sum check compares each
+    # frame against its band's median, and the band-to-band zero-point transfer
+    # needs several nights where both bands were calibrated. Run on one night's
+    # new rows alone they quietly do nothing -- which is exactly what a resumed
+    # run would hand you. lc.write's own append path merged after they had
+    # already run, so this is a fix for --append as well.
+    frame = lc.to_frame(rows) if rows else None
+    if existing is not None:
+        frame = (lc.merge(existing, frame, preference, _host_guard(cfg))
+                 if frame is not None
+                 else lc.reselect_primary(existing, preference, _host_guard(cfg)))
+
     frame = _flag_collapsed_kernels(frame, cfg)
 
     if bool(cfg.get("calibration.transfer_zeropoints", True)):
         frame, transfer_report = zeropoints.transfer(frame, cfg)
         if transfer_report.get("recovered"):
-            frame = lc.reselect_primary(frame, str(cfg.get("output.primary_method", "auto")),
-                                     _host_guard(cfg))
+            frame = lc.reselect_primary(frame, preference, _host_guard(cfg))
     else:
         transfer_report = {}
 
-    paths_out = lc.write(frame, outdir, target, append=append,
-                         preference=str(cfg.get("output.primary_method", "auto")))
-    if append:
-        import pandas as pd
-        frame = pd.read_csv(paths_out["all"])
+    # Already merged above, so nothing for write() to append to.
+    paths_out = lc.write(frame, outdir, target, append=False, preference=preference)
 
     if bool(cfg.get("output.write_qa_plots", True)):
         plots.lightcurve(outdir / f"{target}_lightcurve.png", frame, target)
@@ -1147,6 +1264,9 @@ def run(cfg, target: str, bands: Optional[Sequence[str]] = None,
         "target": target,
         "config_files": cfg.get("_config_files", []),
         "n_images": len(index),
+        "n_measured_now": len(todo),
+        "n_skipped_already_done": skipped,
+        "n_remeasured_after_change": len(changed),
         "n_rows": len(frame),
         "n_failures": len(failures),
         "failures": failures,
@@ -1177,6 +1297,7 @@ def run(cfg, target: str, bands: Optional[Sequence[str]] = None,
         json.dump(summary, fh, indent=2)
     cfg.dump(outdir / "config_used.yaml")
 
-    log.info("done in %.1f s -- %s", summary["elapsed_s"], outdir)
+    log.info("done in %.1f s (%d frames measured, %d already done) -- %s",
+             summary["elapsed_s"], len(todo), skipped, outdir)
     print("\n" + lc.summarise(frame) + "\n")
     return {**paths_out, "outdir": outdir, "summary": summary, "frame": frame}

@@ -403,6 +403,14 @@ subtraction:
 
 # ------------------------------- outputs -----------------------------------
 output:
+  # Pick up where the last run left off: frames already in the photometry table
+  # are left alone and only new ones are measured, so a night of new images
+  # costs a night of work instead of the whole campaign. A frame the observatory
+  # has re-reduced since that table was written is measured again. Turn it off
+  # here, or once with --no-resume; 'tttphot clean' (or --clean) removes the
+  # outputs so there is nothing to resume from, which is what to use after
+  # changing anything the existing rows were measured with.
+  resume: true
   primary_method: auto         # auto | difference_psf | psf | aperture
   # Signal-to-noise at which a measurement becomes a detection rather than an
   # upper limit. Read by the main path and by the zero-point transfer, which

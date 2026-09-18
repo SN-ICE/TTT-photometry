@@ -4,13 +4,17 @@
 #   ./full-run.sh SN2026abgb
 #   ./full-run.sh SN2026abgb --bands g r --max-images 20
 #   ./full-run.sh SN2026abgb --work-root /tmp/scratch
+#   ./full-run.sh SN2026abgb --clean          # start the photometry from scratch
 #
 # Options that every subcommand understands (--config, --data-root,
 # --work-root, --bands, --log-level) are forwarded to ALL of the steps below.
 # Anything else is passed to the final 'tttphot run' only.
 #
-# Steps 2-4 are cached, so re-running is cheap. Step 1 removes only this
-# target's outputs; the downloads and the detector patterns survive.
+# Re-running is cheap: the catalogues and templates are cached, and the run
+# itself measures only the frames that are new since last time. Pass --clean to
+# throw the previous photometry away and measure everything again -- which is
+# what to do after changing the configuration, since the existing rows were
+# measured with the old one.
 set -euo pipefail
 
 if [ $# -lt 1 ] || [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
@@ -53,8 +57,21 @@ soft() {
     return 0
 }
 
-say "1/5  removing previous outputs for $TARGET"
-run tttphot clean "$TARGET" "${COMMON[@]+"${COMMON[@]}"}"
+# --clean is meant for 'tttphot run', which does the removing itself, but the
+# step below has to know about it too -- and it must not reach 'run' twice.
+WANT_CLEAN=0
+KEPT=()
+for arg in "${RUNONLY[@]+"${RUNONLY[@]}"}"; do
+    if [ "$arg" = "--clean" ]; then WANT_CLEAN=1; else KEPT+=("$arg"); fi
+done
+RUNONLY=("${KEPT[@]+"${KEPT[@]}"}")
+
+if [ "$WANT_CLEAN" -eq 1 ]; then
+    say "1/5  removing previous outputs for $TARGET"
+    run tttphot clean "$TARGET" "${COMMON[@]+"${COMMON[@]}"}"
+else
+    say "1/5  keeping previous outputs (pass --clean to start again)"
+fi
 
 say "2/5  resolving the position"
 soft "not resolved; keeping whatever the target file has" \
@@ -68,5 +85,5 @@ say "4/5  reference images for difference imaging"
 soft "no template reached; the run falls back to direct photometry" \
     tttphot fetch-template "$TARGET" "${COMMON[@]+"${COMMON[@]}"}"
 
-say "5/5  photometry"
+say "5/5  photometry (only the frames that are new since the last run)"
 run tttphot run "$TARGET" "${COMMON[@]+"${COMMON[@]}"}" "${RUNONLY[@]+"${RUNONLY[@]}"}"
