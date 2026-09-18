@@ -131,6 +131,25 @@ def slugify(text: str) -> str:
     return text.strip("_")
 
 
+def edge_margin_px(cfg, pixel_scale: float) -> int:
+    """Border to ignore, in pixels of the frame being measured.
+
+    Configured in arcsec (``image.edge_margin_arcsec``) so it means the same
+    patch of sky whatever the binning: 24 px is 9 arcsec unbinned but 17 binned
+    2x2, and on a 1024-pixel frame that fixed margin eats 9 per cent of the
+    field instead of 2. ``image.edge_margin_px`` still overrides it.
+
+    Every consumer goes through here. Three of them used to carry their own
+    hard-coded 24 px default, which happened to agree with the arcsec setting at
+    the default rebinning and disagreed by a factor of two with ``rebin: 1``.
+    """
+    arcsec = cfg.get("image.edge_margin_arcsec")
+    if arcsec:
+        scale = float(pixel_scale) or 1.0
+        return max(int(round(float(arcsec) / scale)), 0)
+    return int(cfg.get("image.edge_margin_px", 0) or 0)
+
+
 def robust_sigma(values: np.ndarray) -> float:
     """Normalised median absolute deviation, NaN-safe."""
     values = np.asarray(values, dtype=float)

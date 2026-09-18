@@ -38,7 +38,8 @@ from . import subtraction as sub
 from .calibration import ZeroPoint, calibrate_image
 from .detection import detect_sources, filter_by_profile, measure_fwhm, select_psf_stars
 from .image import ScienceImage
-from .utils import ensure_dir, first_header_value, get_logger, slugify
+from .utils import (edge_margin_px, ensure_dir, first_header_value, get_logger,
+                    slugify)
 
 log = get_logger("tttphot.pipeline")
 
@@ -515,6 +516,10 @@ def process_image(image: ScienceImage, cfg, coord: SkyCoord, cache_root: Path,
             cal_flags |= lc.FLAG_POOR_CALIBRATION
         if getattr(zp, "relaxed", False):
             cal_flags |= lc.FLAG_RELAXED_CALIBRATION
+        if not zp.meta.get("variables_screened", True):
+            cal_flags |= lc.FLAG_VARIABLES_UNSCREENED
+            log.warning("%s %s: the variable-star screen could not be run, so the "
+                        "zero point may rest on a variable", image.meta.path.name, band)
     common["flags_base"] = cal_flags
 
     sn_xy = image.pixel_of(coord)
@@ -576,7 +581,8 @@ def process_image(image: ScienceImage, cfg, coord: SkyCoord, cache_root: Path,
         if diff.ok:
             rows.extend(_difference_rows(diff, image, cfg, coord, common, zp, limit,
                                          science_epsf=epsf, science_apcor=apcor.apcor_mag,
-                                         science_psf_corr=psf_corr, sources=sources))
+                                         science_psf_corr=psf_corr, sources=sources,
+                                         science_flags=int(tab["flags"][0])))
 
     if bool(cfg.get("output.write_qa_plots", True)):
         plots.epoch_qa(Path(outdir) / "qa" /
@@ -594,15 +600,24 @@ def process_image(image: ScienceImage, cfg, coord: SkyCoord, cache_root: Path,
 
 def _difference_rows(diff, image, cfg, coord, common, zp, limit,
                      science_epsf=None, science_apcor: float = 0.0,
-                     science_psf_corr: float = 0.0, sources=None) -> list[dict]:
+                     science_psf_corr: float = 0.0, sources=None,
+                     science_flags: int = 0) -> list[dict]:
     """Aperture and PSF photometry on the difference image.
 
     When the reference was the frame that got convolved, the difference keeps
     the science PSF exactly, so the PSF model and aperture correction already
     measured on the full science frame are reused -- far more reliable than
     rebuilding them from the handful of stars inside the stamp.
+
+    *science_flags* are the aperture flags from the science frame. Only the
+    saturation bit is carried over: difference pixels scatter about zero, so a
+    saturation test on the stamp can never fire, and a saturated transient would
+    otherwise reach the light curve through an unflagged difference row. Masked
+    pixels need no such help -- they propagate as NaN into the difference and
+    the stamp's own mask finds them.
     """
     rows: list[dict] = []
+    science_flags = int(science_flags) & lc.FLAG_SATURATED
     stamp = _DifferenceImage(diff, image)
     fwhm = _matched_fwhm(diff, image)
     ann = cfg.get("photometry.annulus_scale", [5.0, 8.0])
@@ -701,7 +716,7 @@ def _difference_rows(diff, image, cfg, coord, common, zp, limit,
                                 float(tab["flux"][0]) / scale,
                                 diff_err / scale, zp, apcor_mag, image,
                                 x=sn_xy[0], y=sn_xy[1],
-                                flags=int(tab["flags"][0]) | bad_subtraction,
+                                flags=int(tab["flags"][0]) | bad_subtraction | science_flags,
                                 limit=limit, flux_err_sys=host_sys / scale))
 
     if not bool(cfg.get("photometry.psf.enabled", True)):
@@ -730,7 +745,7 @@ def _difference_rows(diff, image, cfg, coord, common, zp, limit,
                                         dpsf_err / scale, zp, psf_corr,
                                         image, x=float(fit["x"][0]), y=float(fit["y"][0]),
                                         dx=float(fit["dx"][0]), dy=float(fit["dy"][0]),
-                                        flags=int(tab["flags"][0]) | bad_subtraction,
+                                        flags=int(tab["flags"][0]) | bad_subtraction | science_flags,
                                         limit=limit, flux_err_sys=psf_sys / scale))
     return rows
 
@@ -1039,7 +1054,7 @@ def run(cfg, target: str, bands: Optional[Sequence[str]] = None,
                                    "cannot be placed (the observatory pipeline failed on "
                                    "this frame; its sky level is %.0f ADU)"
                                    % float(image.qa.get("sky_adu", np.nan)))
-            if not image.contains(coord, margin=int(cfg.get("image.edge_margin_px", 24))):
+            if not image.contains(coord, margin=edge_margin_px(cfg, image.meta.pixel_scale)):
                 centre = image.center_coord()
                 raise RuntimeError("the target position falls outside this frame, whose "
                                    "centre is %.1f arcmin away (%s)" % (

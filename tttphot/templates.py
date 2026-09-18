@@ -19,6 +19,7 @@ Three sources, tried in the order given by ``subtraction.reference_sources``:
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Sequence
@@ -134,7 +135,11 @@ def build_ttt_stack(images: Sequence, cfg, coord: SkyCoord, band: str,
     cache_key = None
     if cache_root is not None:
         mjds = sorted(round(im.meta.mjd, 5) for im in chosen)
-        digest = abs(hash((target, band, tuple(mjds)))) % (10 ** 10)
+        # A stable digest, not hash(): Python randomises the hash of a str per
+        # process (PEP 456), so a key built from it changes on every run -- the
+        # cache could never be read back and each run left another stack behind.
+        key = f"{target}|{band}|" + ",".join(f"{m:.5f}" for m in mjds)
+        digest = hashlib.md5(key.encode()).hexdigest()[:10]
         cache_key = ensure_dir(Path(cache_root) / "templates") / \
             f"{target}_{band_token(band)}_tttstack_{digest}.fits"
         if cache_key.exists():
@@ -543,8 +548,15 @@ def fetch_panstarrs_cutout(coord: SkyCoord, band: str, size_arcmin: float,
         pieces = []
         for filename in skycells:
             piece = _ps1_fitscut(ra, dec, size_px, filename, timeout)
-            if piece is not None:
-                pieces.append(piece)
+            if piece is None:
+                continue
+            # Every skycell carries its own BSOFTEN/BOFFSET, so each one has to
+            # be linearised with its own header *before* the pieces are merged.
+            # Merging first and linearising with the first cell's constants gave
+            # the filled-in regions a wrong flux, silently, on any field near a
+            # tile edge -- which is the only case the mosaic exists for.
+            piece_data, piece_header = piece
+            pieces.append((linearise_ps1(piece_data, piece_header), piece_header))
         if not pieces:
             return None
     except Exception as exc:
@@ -552,6 +564,8 @@ def fetch_panstarrs_cutout(coord: SkyCoord, band: str, size_arcmin: float,
         return None
 
     data, header = _combine_skycells(pieces)
+    # Each piece was already linearised above; this is a no-op guard for a
+    # cutout that arrived without the asinh keywords at all.
     data = linearise_ps1(data, header)
     # astropy already applied BZERO/BSCALE on read; leaving them in the header
     # would make it apply them again when the cached file is read back, and

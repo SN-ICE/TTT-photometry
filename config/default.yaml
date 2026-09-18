@@ -224,6 +224,15 @@ calibration:
   max_cat_err:
     default: 0.05
     apass: 0.12
+  # A catalogue entry with no quoted error is kept by default, because several
+  # providers quote none at all and dropping them would empty the catalogue on a
+  # sparse field. Set this true where the provider always quotes one (Gaia GSPC,
+  # where a missing error means the synthetic flux was non-positive).
+  require_cat_err: false
+  # Gaia synthetic photometry carries a per-band quality flag; non-zero means
+  # Gaia does not trust that synthetic magnitude. null = do not filter on it,
+  # 0 = keep only unflagged entries (costs stars on sparse fields).
+  max_gaia_synth_flag: null
   mag_range: [11.0, 19.0]
   sigma_clip: 3.0
   color_term: fit              # fit | fixed | none

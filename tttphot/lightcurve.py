@@ -48,6 +48,7 @@ FLAG_APPROX_OFFSET = 1024        # recalculated without the exact magnitude offs
 FLAG_RELAXED_CALIBRATION = 2048  # zero point needed loosened star-selection cuts
 FLAG_DIPOLE_RESIDUAL = 4096      # the difference leaves dipoles: the reference is misregistered
 FLAG_KERNEL_SUM = 8192           # kernel sum far from the band's other epochs: the solve collapsed
+FLAG_VARIABLES_UNSCREENED = 16384  # the variable-star screen could not be run for this frame
 
 FLAG_NAMES = {
     FLAG_MASKED_PIXEL: "masked_pixel", FLAG_SATURATED: "saturated",
@@ -58,6 +59,7 @@ FLAG_NAMES = {
     FLAG_ZP_TRANSFERRED: "zp_transferred", FLAG_APPROX_OFFSET: "approx_offset",
     FLAG_RELAXED_CALIBRATION: "relaxed_calibration",
     FLAG_DIPOLE_RESIDUAL: "dipole_residual", FLAG_KERNEL_SUM: "kernel_sum_outlier",
+    FLAG_VARIABLES_UNSCREENED: "variables_unscreened",
 }
 
 
@@ -83,6 +85,11 @@ def _suspect(row: dict) -> bool:
         flags = int(row.get("flags", 0) or 0)
     except (TypeError, ValueError):
         return False
+    # A masked or off-frame aperture is a *biased* flux, not merely a noisy one:
+    # aperture_photometry drops the masked pixels from the sum and nothing puts
+    # their flux back, so the measurement is systematically faint. It stays
+    # usable -- 'only if nothing cleaner exists' -- rather than being discarded.
+    #
     # A dipole 'downgrade' is deliberately NOT suspect here. Demoting on it was
     # tried and measured: on SN2022xkq it changed nothing at all (the gain there
     # came from the kernel-sum check), and on SN2023ixf it moved 46 epochs off
@@ -90,7 +97,8 @@ def _suspect(row: dict) -> bool:
     # with an independent reduction -- while giving up host subtraction on M101,
     # which is a real cost the metrics cannot see. The flag stays as an
     # annotation; only a 'fail', which also sets FLAG_BAD_SUBTRACTION, demotes.
-    return bool(flags & (FLAG_BAD_SUBTRACTION | FLAG_SATURATED | FLAG_IN_TEMPLATE))
+    return bool(flags & (FLAG_BAD_SUBTRACTION | FLAG_SATURATED | FLAG_IN_TEMPLATE
+                         | FLAG_MASKED_PIXEL | FLAG_OFF_IMAGE))
 
 
 # A direct measurement brighter than the same epoch's difference measurement by

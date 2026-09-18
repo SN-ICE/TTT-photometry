@@ -102,11 +102,19 @@ def remove(data: np.ndarray, cfg, gain: float, readnoise: float,
 
     finite = np.isfinite(data)
     work = np.where(finite, data, float(np.nanmedian(data[finite])) if finite.any() else 0.0)
+    # detect_cosmics multiplies the frame by the gain and works in electrons
+    # throughout, and its satlevel is compared against that electron-scale
+    # array (astroscrappy.pyx: `cleanarr = indat * gain`, then
+    # `satpixels = data >= satlevel`). Passing the ADU level made the threshold
+    # a factor of `gain` too low -- 3.96 on TTT3 -- so every pixel above a
+    # quarter of full well was treated as saturated and shielded from cleaning,
+    # on exactly the stars the PSF and the aperture correction are built from.
+    gain_e = float(gain) or 1.0
     try:
         crmask, cleaned = astroscrappy.detect_cosmics(
             work.astype(np.float32), inmask=keep,
-            gain=float(gain) or 1.0, readnoise=float(readnoise) or 0.0,
-            satlevel=float(saturation),
+            gain=gain_e, readnoise=float(readnoise) or 0.0,
+            satlevel=float(saturation) * gain_e,
             sigclip=float(cfg.get("image.cosmic_rays.sigclip", 4.5)),
             sigfrac=float(cfg.get("image.cosmic_rays.sigfrac", 0.3)),
             objlim=float(cfg.get("image.cosmic_rays.objlim", 10.0)),

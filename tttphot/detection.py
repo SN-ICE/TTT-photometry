@@ -10,7 +10,7 @@ from astropy.modeling import fitting, models
 from astropy.table import Table
 from photutils.detection import DAOStarFinder
 
-from .utils import get_logger
+from .utils import edge_margin_px, get_logger
 
 log = get_logger("tttphot.detection")
 
@@ -86,7 +86,7 @@ def select_psf_stars(image, sources: Table, cfg, fwhm_px: float,
     peak = np.asarray(sources["peak"], dtype=float)
 
     isolation = float(cfg.get("photometry.isolation_scale", 3.0)) * fwhm_px
-    margin = max(int(cfg.get("image.edge_margin_px", 24)),
+    margin = max(edge_margin_px(cfg, image.meta.pixel_scale),
                  int(np.ceil(float(cfg.get("photometry.psf.stamp_scale", 5.0)) * fwhm_px)))
 
     sky_rms = float(np.nanmedian(image.bkg_rms))

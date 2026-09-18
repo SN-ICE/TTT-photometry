@@ -14,7 +14,7 @@ from photutils.aperture import (ApertureStats, CircularAnnulus, CircularAperture
 from photutils.psf import EPSFBuilder, PSFPhotometry, extract_stars
 
 from .detection import neighbour_distance
-from .utils import get_logger, odd
+from .utils import edge_margin_px, get_logger, odd
 
 log = get_logger("tttphot.photometry")
 
@@ -299,7 +299,7 @@ def empirical_limit(image, fwhm_px: float, zp: float, cfg, apcor_mag: float = 0.
         sigma = float(cfg.get("calibration.limiting_sigma", 3.0))
     radius = float(cfg.get("photometry.aperture_scale", 1.2)) * fwhm_px
     ny, nx = image.data.shape
-    margin = int(np.ceil(radius)) + int(cfg.get("image.edge_margin_px", 24))
+    margin = int(np.ceil(radius)) + edge_margin_px(cfg, image.meta.pixel_scale)
     rng = np.random.default_rng(rng_seed)
 
     xs = rng.uniform(margin, nx - margin, size=n_apertures * 4)

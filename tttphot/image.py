@@ -20,7 +20,7 @@ from astropy.wcs.utils import proj_plane_pixel_scales
 import astropy.units as u
 from photutils.background import Background2D, MedianBackground
 
-from .utils import first_header_value, get_logger
+from .utils import edge_margin_px, first_header_value, get_logger
 
 log = get_logger("tttphot.image")
 
@@ -309,15 +309,8 @@ class ScienceImage:
         return mask
 
     def _edge_margin(self, cfg) -> int:
-        """Edge margin in pixels. Configured in arcsec so it means the same
-        patch of sky whatever the binning: 24 px is 9 arcsec unbinned but 17
-        binned 2x2, and on a 1024 frame that fixed margin eats 9 per cent of
-        the field instead of 2."""
-        arcsec = cfg.get("image.edge_margin_arcsec")
-        if arcsec:
-            scale = float(self.meta.pixel_scale) or 1.0
-            return max(int(round(float(arcsec) / scale)), 0)
-        return int(cfg.get("image.edge_margin_px", 0) or 0)
+        """Edge margin in pixels (see utils.edge_margin_px)."""
+        return edge_margin_px(cfg, self.meta.pixel_scale)
 
     def _background_box(self, cfg) -> int:
         """Background mesh size in pixels.
