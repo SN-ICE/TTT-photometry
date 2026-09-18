@@ -332,11 +332,14 @@ subtraction:
   # Frames a band needs before the median it is compared against means anything.
   # Below this the check is skipped -- and says so, rather than passing silently.
   kernel_sum_min_images: 5
-  # Report (never flag) when the normalised kernel sums of a band span more than
-  # this fraction. The tolerance above catches a collapsed solve; this catches
-  # the few-per-cent wobble that still costs a tenth of a magnitude when the
-  # host inside the aperture is a few times the transient. 0 turns it off.
-  kernel_sum_warn_fraction: 0.05
+  # Report (never flag) when the normalised kernel sums of a band scatter by
+  # more than this, measured as the 16-84 percentile range over the median so
+  # that it does not grow with the number of frames. The tolerance above catches
+  # a collapsed solve; this catches the few-per-cent wobble that still costs a
+  # tenth of a magnitude when the host inside the aperture is a few times the
+  # transient. Healthy data on this archive sits at 1.9-3.1 per cent; the
+  # SN 2026abwp r band that scattered 0.21 mag read 8.6. 0 turns it off.
+  kernel_sum_warn_fraction: 0.06
   # Re-register the reference image on the same astrometric catalogue as the
   # science frames before differencing: shift | linear | off. The PS1 stack
   # cutout for SN 2026abgb sat 0.26" off Gaia while every TTT frame was within

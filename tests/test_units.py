@@ -504,6 +504,66 @@ def test_transfer_keeps_the_cameras_apart():
 
 
 # ---------------------------------------------------------------------------
+# the kernel-sum spread report  (SN2026abwp, 2026-09-18)
+# ---------------------------------------------------------------------------
+def _kernel_frame(kernel_sums, zps, band="r"):
+    n = len(kernel_sums)
+    return pd.DataFrame({
+        "image": [f"{band}{i}.fits" for i in range(n)],
+        "method": ["difference_psf"] * n, "band": [band] * n,
+        "diff_kernel_sum": list(kernel_sums), "zp": list(zps),
+        "exptime": [120.0] * n, "pixel_scale": [0.385] * n,
+        "diff_mode": ["convolve_reference"] * n, "ref_source": ["panstarrs"] * n,
+        "detector": ["QHY600-TTT3 1595x1064"] * n, "flags": [0] * n,
+        "mjd": [61300.0 + 0.01 * i for i in range(n)],
+    })
+
+
+def _warnings_from(frame, caplog):
+    import logging
+    from tttphot import pipeline as pl
+    from tttphot.config import Config, DEFAULT_CONFIG, load_yaml
+
+    cfg = Config(load_yaml(DEFAULT_CONFIG))
+    with caplog.at_level(logging.WARNING, logger="tttphot.pipeline"):
+        pl._flag_collapsed_kernels(frame.copy(), cfg)
+    return [r for r in caplog.records if "scatters by" in r.getMessage()]
+
+
+def test_kernel_sum_spread_is_reported_when_the_flux_scale_wanders(caplog):
+    """The real SN2026abwp r band, as it was before the stamp fix.
+
+    Four frames whose normalised kernel sums scatter by 8.6 per cent. Two of
+    them, nine minutes apart, came out 0.21 mag (5.4 sigma) apart because the
+    host inside the aperture is 2.6-4.5 times the transient, so the kernel's
+    flux scale is multiplied by that before it reaches the magnitude. The
+    factor-of-three tolerance cannot see a wobble this size, and the group was
+    too small for the consistency check to run at all.
+    """
+    frame = _kernel_frame([0.1128, 0.1174, 0.1078, 0.1205],
+                          [23.489, 23.544, 23.414, 23.424])
+    assert _warnings_from(frame, caplog), "the 8.6% case must be reported"
+
+
+def test_kernel_sum_spread_is_quiet_on_healthy_data(caplog):
+    """The same band once the kernel had its full complement of stamps."""
+    frame = _kernel_frame([0.1127, 0.1227, 0.1058, 0.1084],
+                          [23.489, 23.544, 23.414, 23.424])
+    assert not _warnings_from(frame, caplog), "healthy data must not warn"
+
+
+def test_kernel_sum_spread_does_not_grow_with_the_number_of_frames(caplog):
+    """Peak-to-peak would: it widens with n on its own, so a long healthy
+    campaign read 5-8 per cent of it and would have warned for nothing. The
+    16-84 percentile range is the same quantity whatever n."""
+    rng = np.random.default_rng(0)
+    for n in (4, 12, 28, 60):
+        sums = 0.112 * (1 + rng.normal(0, 0.012, n))      # 1.2 per cent, healthy
+        frame = _kernel_frame(sums, np.full(n, 23.45))
+        assert not _warnings_from(frame, caplog), f"warned on {n} healthy frames"
+
+
+# ---------------------------------------------------------------------------
 # lightcurve
 # ---------------------------------------------------------------------------
 def _row(method, mag=18.0, flags=0, **kw):

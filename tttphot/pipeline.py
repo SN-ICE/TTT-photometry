@@ -957,13 +957,23 @@ def _flag_collapsed_kernels(frame, cfg):
         # solve, not a wobble -- but a few per cent of scatter in the kernel sum
         # is a tenth of a magnitude once the host in the aperture is a few times
         # the transient, and that used to go by in silence.
-        if np.isfinite(ref) and ref > 0 and len(good) > 1:
-            spread = float(np.ptp(good) / ref)
-            if warn_fraction > 0 and spread > warn_fraction:
-                log.warning("%s %s (%s): the normalised kernel sum spans %.1f%% across "
-                            "%d frames. The kernel's flux scale sets how much reference "
-                            "is subtracted, so on a bright host this is a real magnitude "
-                            "error, not a rounding one. Check diff_nstamps.",
+        #
+        # The 16-84 percentile range, not peak to peak: the full range widens
+        # with the number of frames on its own, so a healthy 28-frame band reads
+        # 5-8 per cent of it and a 4-frame band reads less, and a threshold on
+        # that would fire on the good data and stay quiet on the bad. Measured
+        # on this archive: 1.9-3.1 per cent across SN 2026abgb's three bands,
+        # 2.2-2.9 on SN 2026abwp once the kernel had enough stamps, and 8.6 on
+        # the SN 2026abwp r band that put two frames nine minutes apart 0.21 mag
+        # (5.4 sigma) apart. Four frames is the fewest the percentiles mean
+        # anything on.
+        if warn_fraction > 0 and np.isfinite(ref) and ref > 0 and len(good) >= 4:
+            spread = float(np.percentile(good, 84) - np.percentile(good, 16)) / ref
+            if spread > warn_fraction:
+                log.warning("%s %s (%s): the normalised kernel sum scatters by %.1f%% "
+                            "across %d frames. The kernel's flux scale sets how much "
+                            "reference is subtracted, so on a bright host this is a real "
+                            "magnitude error, not a rounding one. Check diff_nstamps.",
                             key[0], key[1] or "reference",
                             "normalised" if key[2] == "calibrated" else key[2],
                             100 * spread, n_images)
