@@ -1,5 +1,11 @@
 # Validation
 
+This document records historical validation runs. References below to the
+host guard and automatic fallback after subtraction-quality failures describe
+the selection policy at the time. Since 2026-10-05, usable difference
+measurements are retained with their flags and drawn as open symbols; see
+the README for the current selection and color-pairing policy.
+
 Sections 1-4: state on 2026-09-15, with one real frame:
 `TTT3_QHY600-3_2026-09-11-22-15-41-277664_2026abgb_SDSSg.fits` (TTT3, SDSSg,
 120 s, 3x3 binned, 3191 x 2129 px at 0.192"/px).

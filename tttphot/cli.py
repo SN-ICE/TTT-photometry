@@ -71,7 +71,7 @@ def cmd_run(args) -> int:
     result = pipeline.run(cfg, args.target, bands=args.bands, max_images=args.max_images,
                           refresh=args.refresh, skip_subtraction=args.no_subtraction,
                           append=args.append, skip=args.skip,
-                          resume=not getattr(args, "no_resume", False))
+                          resume=False if getattr(args, "no_resume", False) else None)
     print(f"outputs in {result['outdir']}")
     return 0
 
@@ -236,7 +236,11 @@ def cmd_recalibrate(args) -> int:
     primary = frame[frame["primary"].astype(bool)]
     keep = [c for c in pd.read_csv(slim_path, nrows=0).columns if c in primary.columns]
     primary[keep].to_csv(slim_path, index=False, float_format="%.6f")
-    plots.lightcurve(outdir / f"{args.target}_lightcurve.png", frame, args.target)
+    color_window = float(cfg.get("output.color_max_separation_minutes", lc.COLOR_MAX_SEPARATION_MINUTES))
+    lc.color_curve(frame, color_window).to_csv(outdir / f"{args.target}_colors.csv",
+                                              index=False, float_format="%.6f")
+    plots.lightcurve(outdir / f"{args.target}_lightcurve.png", frame, args.target,
+                     color_max_separation_minutes=color_window)
     plots.run_diagnostics(outdir / f"{args.target}_diagnostics.png", frame, args.target)
     print(f"\nrewrote {table.name}, {slim_path.name} and the plots")
     return 0
@@ -884,8 +888,8 @@ def main(argv=None) -> int:
     run_parser.add_argument("--refresh", action="store_true",
                             help="ignore cached catalogues and templates")
     run_parser.add_argument("--append", action="store_true",
-                            help="merge into an existing table instead of replacing it "
-                                 "(use when re-running one band)")
+                            help="compatibility option: runs always merge existing "
+                                 "results; use --clean to discard them")
     run_parser.add_argument("--aperture-scale", type=float, default=None)
     run_parser.add_argument("--catalogs", nargs="+", default=None)
     run_parser.set_defaults(func=cmd_run)

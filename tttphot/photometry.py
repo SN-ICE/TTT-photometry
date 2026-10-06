@@ -7,7 +7,7 @@ from typing import Optional, Sequence
 
 import numpy as np
 from astropy.nddata import NDData
-from astropy.stats import SigmaClip, sigma_clipped_stats
+from astropy.stats import SigmaClip, mad_std, sigma_clipped_stats
 from astropy.table import Table
 from photutils.aperture import (ApertureStats, CircularAnnulus, CircularAperture,
                                 aperture_photometry)
@@ -296,6 +296,25 @@ def psf_photometry_at(image, psf_model, positions: Sequence[tuple[float, float]]
     return out
 
 
+# photutils 2.x bits: outside image, non-convergence, missing covariance,
+# no overlap, fully masked, too few fitting pixels. These are not our pipeline
+# flag values. Partial fits (1), non-positive flux (4) and positional bounds
+# (32) remain diagnostics: negative flux is a valid forced nondetection, and
+# near-bound flags also occur for intentionally fixed positions.
+PSF_FAILURE_BITS = 2 | 8 | 16 | 64 | 128 | 256
+
+
+def psf_fit_failed(fit: Table) -> np.ndarray:
+    """Fits that must not calibrate or outrank a clean aperture measurement."""
+    raw = np.asarray(fit["psf_flags"], dtype=int) if "psf_flags" in fit.colnames \
+        else np.zeros(len(fit), dtype=int)
+    bad = (raw & PSF_FAILURE_BITS) != 0
+    for column in ("x", "y", "flux", "flux_err"):
+        bad |= ~np.isfinite(np.asarray(fit[column], dtype=float))
+    bad |= np.asarray(fit["flux_err"], dtype=float) <= 0
+    return bad
+
+
 # --------------------------------------------------------------------------
 # depth
 # --------------------------------------------------------------------------
@@ -326,27 +345,8 @@ def empirical_limit(image, fwhm_px: float, zp: float, cfg, apcor_mag: float = 0.
     if sigma is None:
         sigma = float(cfg.get("calibration.limiting_sigma", 3.0))
     radius = float(cfg.get("photometry.aperture_scale", 1.2)) * fwhm_px
-    ny, nx = image.data.shape
     margin = int(np.ceil(radius)) + edge_margin_px(cfg, image.meta.pixel_scale)
-    rng = np.random.default_rng(rng_seed)
-
-    # n_apertures is the number placed. It used to be multiplied by four here
-    # and every one of them used, so the parameter said 300 and meant 1200.
-    xs = rng.uniform(margin, nx - margin, size=n_apertures)
-    ys = rng.uniform(margin, ny - margin, size=n_apertures)
-    positions = np.column_stack([xs, ys])
-    apertures = CircularAperture(positions, r=radius)
-    phot = aperture_photometry(image.data_sub, apertures, mask=image.mask)
-    sums = np.asarray(phot["aperture_sum"], dtype=float)
-
-    # Drop apertures that landed on a source: keep the quiet 80 per cent.
-    finite = np.isfinite(sums)
-    sums = sums[finite]
-    if sums.size < 20:
-        return limiting_magnitude(image, fwhm_px, zp, cfg, apcor_mag, sigma)
-    lo, hi = np.percentile(sums, [10, 90])
-    quiet = sums[(sums >= lo) & (sums <= hi)]
-    _, _, std = sigma_clipped_stats(quiet, sigma=3.0, maxiters=5)
+    std = _blank_aperture_scatter(image, radius, n_apertures, rng_seed, margin)
     if not np.isfinite(std) or std <= 0:
         return limiting_magnitude(image, fwhm_px, zp, cfg, apcor_mag, sigma)
     return float(-2.5 * np.log10(sigma * std / max(image.meta.exptime, 1e-6))
@@ -380,6 +380,7 @@ def psf_to_aperture_correction(image, psf_model, stars: Table, fwhm_px: float, c
     psf_flux = np.asarray(fit["flux"], dtype=float)
     good = ((np.asarray(aper["flags"], dtype=int) == 0) & (aper_flux > 0) & (psf_flux > 0)
             & np.isfinite(aper_flux) & np.isfinite(psf_flux))
+    good &= ~psf_fit_failed(fit)
     if good.sum() < min_stars:
         log.debug("%s: only %d stars for the PSF-to-aperture correction",
                   image.meta.path.name, int(good.sum()))
@@ -407,18 +408,48 @@ def blank_aperture_noise(image, radius_px: float, cfg, n_apertures: int = 400,
     margin = int(np.ceil(radius_px)) + 2
     if min(ny, nx) < 4 * margin:
         return float("nan")
+    return _blank_aperture_scatter(image, radius_px, n_apertures, rng_seed, margin)
+
+
+def _blank_aperture_scatter(image, radius_px, n_apertures, rng_seed, margin):
+    """Gaussian-calibrated MAD of complete apertures away from detected sources.
+
+    Detect positive and negative structure on a smoothed image before placing
+    apertures. Never select apertures by percentiles of their own flux: doing
+    so truncates even a source-free Gaussian and underestimates its variance.
+    """
+    from scipy.ndimage import gaussian_filter, maximum_filter
+
+    data = np.asarray(image.data_sub, dtype=float)
+    ny, nx = data.shape
+    if min(ny, nx) <= 2 * margin:
+        return float("nan")
+    bad = np.asarray(image.mask, dtype=bool) | ~np.isfinite(data)
+    valid = ~bad
+    if not valid.any():
+        return float("nan")
+    median = float(np.median(data[valid]))
+    smooth = gaussian_filter(np.where(valid, data - median, 0.),
+                             sigma=max(float(radius_px) / 3., 1.))
+    scale = float(mad_std(smooth[valid]))
+    if np.isfinite(scale) and scale > 0:
+        bad = bad | (np.abs(smooth - np.median(smooth[valid])) > 5. * scale)
+    # Reject whole apertures touching sources, bad pixels or incomplete data.
+    # The extra pixel accounts for fractional centres and edge-pixel overlap.
+    avoid = maximum_filter(bad, size=2 * int(np.ceil(radius_px)) + 3)
     rng = np.random.default_rng(rng_seed)
     xs = rng.uniform(margin, nx - margin, size=n_apertures)
     ys = rng.uniform(margin, ny - margin, size=n_apertures)
-    apertures = CircularAperture(np.column_stack([xs, ys]), r=float(radius_px))
-    phot = aperture_photometry(image.data_sub, apertures, mask=image.mask)
+    keep = ~avoid[np.rint(ys).astype(int), np.rint(xs).astype(int)]
+    if keep.sum() < 20:
+        return float("nan")
+    apertures = CircularAperture(np.column_stack([xs[keep], ys[keep]]), r=float(radius_px))
+    phot = aperture_photometry(data, apertures, mask=image.mask)
     sums = np.asarray(phot["aperture_sum"], dtype=float)
     sums = sums[np.isfinite(sums)]
     if sums.size < 20:
         return float("nan")
-    lo, hi = np.percentile(sums, [5, 95])
-    quiet = sums[(sums >= lo) & (sums <= hi)]
-    _, _, std = sigma_clipped_stats(quiet, sigma=3.0, maxiters=5)
+    std = float(mad_std(sums))
     return float(std) if np.isfinite(std) and std > 0 else float("nan")
 
 

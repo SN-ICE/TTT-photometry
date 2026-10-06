@@ -27,7 +27,8 @@ COLUMNS = [
     "diff_residual_sigma", "diff_target_dipole",
     "inject_limit_mag", "inject_limit_err", "inject_sites", "error_scale",
     "ref_source", "ref_band", "ref_nimages", "diff_mode", "diff_chi2", "diff_kernel_sum", "diff_nstamps", "diff_kernel_dx", "diff_kernel_dy", "diff_host_residual", "diff_host_nsites",
-    "x", "y", "dx", "dy", "flags", "quality", "image",
+    "x", "y", "dx", "dy", "psf_flags", "psf_qfit", "psf_cfit",
+    "flags", "quality", "image", "input_fingerprint",
 ]
 
 # Order in which methods are preferred when output.primary_method is 'auto'.
@@ -49,6 +50,17 @@ FLAG_RELAXED_CALIBRATION = 2048  # zero point needed loosened star-selection cut
 FLAG_DIPOLE_RESIDUAL = 4096      # the difference leaves dipoles: the reference is misregistered
 FLAG_KERNEL_SUM = 8192           # kernel sum far from the band's other epochs: the solve collapsed
 FLAG_VARIABLES_UNSCREENED = 16384  # the variable-star screen could not be run for this frame
+FLAG_BAD_PSF = 32768          # PSF fit failed or has no usable parameter uncertainty
+
+# These compromise the target measurement itself. Subtraction QA failures
+# (including kernel-sum outliers) are warnings: retain them for inspection.
+INVALID_MEASUREMENT_FLAGS = (FLAG_MASKED_PIXEL | FLAG_SATURATED | FLAG_OFF_IMAGE
+                             | FLAG_IN_TEMPLATE | FLAG_BAD_PSF | FLAG_NO_ZEROPOINT)
+OPEN_SYMBOL_FLAGS = (INVALID_MEASUREMENT_FLAGS | FLAG_BAD_SUBTRACTION
+                     | FLAG_DIPOLE_RESIDUAL | FLAG_KERNEL_SUM | FLAG_CROSS_BAND_TEMPLATE
+                     | FLAG_FEW_CAL_STARS | FLAG_POOR_CALIBRATION | FLAG_ZP_TRANSFERRED
+                     | FLAG_APPROX_OFFSET | FLAG_RELAXED_CALIBRATION)
+COLOR_MAX_SEPARATION_MINUTES = 30.0
 
 FLAG_NAMES = {
     FLAG_MASKED_PIXEL: "masked_pixel", FLAG_SATURATED: "saturated",
@@ -60,6 +72,7 @@ FLAG_NAMES = {
     FLAG_RELAXED_CALIBRATION: "relaxed_calibration",
     FLAG_DIPOLE_RESIDUAL: "dipole_residual", FLAG_KERNEL_SUM: "kernel_sum_outlier",
     FLAG_VARIABLES_UNSCREENED: "variables_unscreened",
+    FLAG_BAD_PSF: "bad_psf",
 }
 
 
@@ -81,118 +94,47 @@ def new_row(**kwargs) -> dict:
 
 
 def _suspect(row: dict) -> bool:
+    """Whether target validity, rather than field-level QA, is compromised."""
     try:
-        flags = int(row.get("flags", 0) or 0)
+        return bool(int(row.get("flags", 0) or 0) & INVALID_MEASUREMENT_FLAGS)
     except (TypeError, ValueError):
         return False
-    # A masked or off-frame aperture is a *biased* flux, not merely a noisy one:
-    # aperture_photometry drops the masked pixels from the sum and nothing puts
-    # their flux back, so the measurement is systematically faint. It stays
-    # usable -- 'only if nothing cleaner exists' -- rather than being discarded.
-    #
-    # A dipole 'downgrade' is deliberately NOT suspect here. Demoting on it was
-    # tried and measured: on SN2022xkq it changed nothing at all (the gain there
-    # came from the kernel-sum check), and on SN2023ixf it moved 46 epochs off
-    # their difference image with no improvement in either scatter or agreement
-    # with an independent reduction -- while giving up host subtraction on M101,
-    # which is a real cost the metrics cannot see. The flag stays as an
-    # annotation; only a 'fail', which also sets FLAG_BAD_SUBTRACTION, demotes.
-    return bool(flags & (FLAG_BAD_SUBTRACTION | FLAG_SATURATED | FLAG_IN_TEMPLATE
-                         | FLAG_MASKED_PIXEL | FLAG_OFF_IMAGE))
 
 
-# A direct measurement brighter than the same epoch's difference measurement by
-# more than this carries enough host light to be worse than a difference image
-# that merely failed the dipole test (0.2 mag = the host supplies 17 per cent of
-# the direct flux). See choose_primary.
+# Kept for compatibility with existing configurations and Python callers.
+# Auto selection no longer depends on a difference-versus-direct magnitude gap.
 HOST_GUARD_MAG = 0.2
-
-
-def _host_guard_candidate(row: dict, max_chi2: float = 2.5) -> bool:
-    """A difference measurement that is flagged only for dipole residuals.
-
-    Its kernel solved (no kernel-sum outlier, a finite chi2 within bounds) and
-    its template is in the right filter; what it failed is the field-star
-    dipole test. That is a warning about registration, not evidence that the
-    flux at the transient is wrong.
-    """
-    if not str(row.get("method", "")).startswith("difference"):
-        return False
-    try:
-        flags = int(row.get("flags", 0) or 0)
-        chi2 = float(row.get("diff_chi2", np.nan))
-    except (TypeError, ValueError):
-        return False
-    if flags & (FLAG_KERNEL_SUM | FLAG_CROSS_BAND_TEMPLATE | FLAG_SATURATED | FLAG_IN_TEMPLATE):
-        return False
-    if not (np.isfinite(chi2) and chi2 <= max_chi2):
-        return False
-    return np.isfinite(row.get("mag", np.nan))
 
 
 def choose_primary(rows: Sequence[dict], preference: str = "auto",
                    host_guard_mag: Optional[float] = HOST_GUARD_MAG) -> Optional[dict]:
-    """Pick the row that represents the epoch in the final light curve.
+    """Prefer usable difference photometry, retaining subtraction QA warnings.
 
-    Preference order is difference-image PSF, difference aperture, direct PSF,
-    direct aperture -- but a measurement carrying a hard quality flag (a failed
-    subtraction, a saturated aperture, a difference leaving dipole residuals) is
-    only used if nothing cleaner exists.
-
-    With one exception. Falling back from a flagged difference to *direct*
-    photometry is only an improvement when the host is faint under the
-    transient. When the direct measurement comes out brighter than the
-    difference by more than ``host_guard_mag``, more than half of its flux is
-    galaxy, and a subtraction that merely failed the dipole test is by far the
-    better number. On SN 2026abgb this is the difference between 18.5 and
-    16.9 mag for the same g epoch. The adopted row keeps its flags.
-
-    The threshold was 0.75 mag at first, which is "more than half the flux is
-    host". It let two TTT3/QHY600 r epochs of 2026-09-15 through with direct
-    photometry 0.57 and 0.69 mag too bright (16.82, 16.68), while their flagged
-    differences (17.39, 17.36) matched the iKon936 frames taken ten minutes
-    later (17.34). On that target no epoch in any band has a gap below 0.32 mag,
-    so 0.2 changes nothing else.
+    Field residuals, chi2 and kernel-sum outliers flag a measurement for review;
+    they do not justify substituting host-contaminated direct photometry.
+    Target-invalid measurements (e.g. masked pixels or a failed PSF fit) yield
+    to valid alternatives. Within each family detections precede finite limits,
+    then PSF precedes aperture. An explicit method remains an override.
+    ``host_guard_mag`` is accepted for compatibility but has no effect.
     """
-    usable = [r for r in rows if np.isfinite(r.get("mag", np.nan)) or r.get("is_limit")]
+    usable = [r for r in rows if
+              (not r.get("is_limit", False) and np.isfinite(r.get("mag", np.nan)))
+              or (r.get("is_limit", False) and np.isfinite(r.get("limit_mag", np.nan)))]
     if not usable:
         return None
-
     if preference and preference != "auto":
         for row in usable:
             if row["method"] == preference:
                 return row
 
-    chosen = None
-    for allow_suspect in (False, True):
-        for require_detection in (True, False):
-            for method in METHOD_PRIORITY:
-                for row in usable:
-                    if row["method"] != method:
-                        continue
-                    if not allow_suspect and _suspect(row):
-                        continue
-                    if require_detection and not np.isfinite(row.get("mag", np.nan)):
-                        continue
-                    chosen = row
-                    break
-                if chosen is not None:
-                    break
-            if chosen is not None:
-                break
-        if chosen is not None:
-            break
-    if chosen is None:
-        return usable[0]
-
-    if (host_guard_mag is not None and not str(chosen["method"]).startswith("difference")
-            and np.isfinite(chosen.get("mag", np.nan))):
-        for method in METHOD_PRIORITY[:2]:
-            for row in usable:
-                if row["method"] == method and _host_guard_candidate(row):
-                    if float(row["mag"]) - float(chosen["mag"]) > float(host_guard_mag):
-                        return row
-    return chosen
+    valid = [r for r in usable if not _suspect(r)]
+    candidates = valid or usable
+    differences = [r for r in candidates if str(r["method"]).startswith("difference")]
+    candidates = differences or candidates
+    return min(candidates, key=lambda r: (
+        bool(r.get("is_limit", False)),
+        METHOD_PRIORITY.index(r["method"]) if r["method"] in METHOD_PRIORITY else len(METHOD_PRIORITY),
+    ))
 
 
 def reselect_primary(frame: pd.DataFrame, preference: str = "auto",
@@ -229,20 +171,91 @@ def to_frame(rows: Iterable[dict]) -> pd.DataFrame:
 def merge(existing: pd.DataFrame, new: pd.DataFrame,
           preference: str = "auto",
           host_guard_mag: Optional[float] = HOST_GUARD_MAG) -> pd.DataFrame:
-    """Combine a previous run's table with new rows, newest measurement wins.
+    """Replace every method of a remeasured image with its new measurements.
 
     The primary flag is recomputed per image afterwards: the two runs each
-    chose one, and after merging only one may stand.
+    chose one, and after merging only one may stand. A method absent from the
+    new measurement (e.g. a failed subtraction) must not survive from an older
+    reduction. Images absent from ``new`` retain all their previous rows.
     """
     keys = ["image", "method"]
-    combined = pd.concat([existing, new], ignore_index=True)
+    retained = existing[~existing["image"].isin(new["image"])]
+    combined = pd.concat([retained, new], ignore_index=True)
     combined = combined.drop_duplicates(subset=keys, keep="last")
     combined = combined.sort_values(["band", "mjd", "method"]).reset_index(drop=True)
     return reselect_primary(combined, preference, host_guard_mag)
 
 
+COLOR_COLUMNS = ["target", "color", "system", "mjd", "color_mag", "color_err",
+                 "separation_minutes", "flags", "flags_str", "flagged",
+                 "mjd_a", "mjd_b", "mag_a", "mag_b", "mag_err_a", "mag_err_b",
+                 "image_a", "image_b", "method_a", "method_b", "detector_a", "detector_b"]
+
+
+def color_curve(frame: pd.DataFrame,
+                max_separation_minutes: float = COLOR_MAX_SEPARATION_MINUTES) -> pd.DataFrame:
+    """Pair primary detections for g-r, r-i, g-i, closest available pair first.
+
+    Pair only within the same magnitude system and photometry family (direct
+    or difference). Each exposure is used at most once per color. Times are
+    pair midpoints; errors assume independent magnitude uncertainties. No
+    interpolation, limits, or band-display offsets enter the colors.
+    """
+    maximum = float(max_separation_minutes)
+    if not np.isfinite(maximum) or maximum < 0:
+        raise ValueError("color_max_separation_minutes must be finite and nonnegative")
+    selected = frame.loc[frame["primary"].fillna(False).astype(bool)].copy()
+    selected = selected.loc[
+        ~selected["is_limit"].fillna(False).astype(bool)
+        & np.isfinite(selected["mag"]) & np.isfinite(selected["mag_err"])
+        & (selected["mag_err"] >= 0) & np.isfinite(selected["mjd"])
+    ]
+    selected["family"] = selected["method"].str.startswith("difference")
+    result = []
+    # Unknown systems cannot safely be combined; groupby drops missing values.
+    for (_, system, _), group in selected.groupby(["target", "system", "family"], sort=True):
+        for band_a, band_b in (("g", "r"), ("r", "i"), ("g", "i")):
+            a = group.loc[group["band"] == band_a].sort_values(["mjd", "image"]).to_dict("records")
+            b = group.loc[group["band"] == band_b].sort_values(["mjd", "image"]).to_dict("records")
+            if not a or not b:
+                continue
+            # Limit candidate construction to the nearby time window rather
+            # than allocating every pair of a potentially long campaign.
+            times_b = np.array([r["mjd"] for r in b])
+            edges = []
+            tolerance = 1e-7  # minutes: floating-point MJD boundary roundoff
+            window = (maximum + tolerance) / 1440.
+            for ia, ra in enumerate(a):
+                lo, hi = np.searchsorted(times_b, [ra["mjd"] - window, ra["mjd"] + window], side="left")
+                hi = min(hi + 1, len(b))
+                for ib in range(lo, hi):
+                    separation = abs(ra["mjd"] - b[ib]["mjd"]) * 1440.
+                    if separation <= maximum + tolerance:
+                        edges.append((separation, ia, ib))
+            used_a, used_b = set(), set()
+            for separation, ia, ib in sorted(edges):
+                if ia in used_a or ib in used_b:
+                    continue
+                used_a.add(ia)
+                used_b.add(ib)
+                ra, rb = a[ia], b[ib]
+                flags = int(ra["flags"] if pd.notna(ra["flags"]) else 0) | int(rb["flags"] if pd.notna(rb["flags"]) else 0)
+                row = dict(target=ra["target"], color=f"{band_a}-{band_b}", system=system,
+                           mjd=(ra["mjd"] + rb["mjd"]) / 2,
+                           color_mag=ra["mag"] - rb["mag"],
+                           color_err=np.hypot(ra["mag_err"], rb["mag_err"]),
+                           separation_minutes=separation, flags=flags,
+                           flags_str=describe_flags(flags), flagged=bool(flags & OPEN_SYMBOL_FLAGS))
+                for suffix, source in (("a", ra), ("b", rb)):
+                    for key in ("mjd", "mag", "mag_err", "image", "method", "detector"):
+                        row[f"{key}_{suffix}"] = source.get(key, np.nan)
+                result.append(row)
+    return pd.DataFrame(result, columns=COLOR_COLUMNS).sort_values(["color", "mjd"]).reset_index(drop=True)
+
+
 def write(frame: pd.DataFrame, outdir: Path, target: str,
-          append: bool = False, preference: str = "auto") -> dict:
+          append: bool = False, preference: str = "auto",
+          color_max_separation_minutes: float = COLOR_MAX_SEPARATION_MINUTES) -> dict:
     """Write the full table and the primary-only light curve. Returns paths."""
     outdir = Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
@@ -273,9 +286,13 @@ def write(frame: pd.DataFrame, outdir: Path, target: str,
     ]]
     slim.to_csv(lc_path, index=False, float_format="%.6f")
 
+    colors_path = outdir / f"{target}_colors.csv"
+    color_curve(frame, color_max_separation_minutes).to_csv(
+        colors_path, index=False, float_format="%.6f")
+
     log.info("wrote %s (%d rows) and %s (%d epochs)", all_path.name, len(frame),
              lc_path.name, len(slim))
-    return {"all": all_path, "lightcurve": lc_path}
+    return {"all": all_path, "lightcurve": lc_path, "colors": colors_path}
 
 
 def summarise(frame: pd.DataFrame) -> str:

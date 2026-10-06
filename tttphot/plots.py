@@ -20,7 +20,7 @@ if "matplotlib.pyplot" not in sys.modules and not os.environ.get("MPLBACKEND"):
 import matplotlib.pyplot as plt  # noqa: E402
 from astropy.visualization import ZScaleInterval  # noqa: E402
 
-from .lightcurve import FLAG_ZP_TRANSFERRED  # noqa: E402
+from .lightcurve import OPEN_SYMBOL_FLAGS, COLOR_MAX_SEPARATION_MINUTES, color_curve  # noqa: E402
 from .utils import get_logger  # noqa: E402
 
 log = get_logger("tttphot.plots")
@@ -171,8 +171,9 @@ def epoch_qa(path: Path, image, zp, apcor, diff=None, sn_xy=None, cutout=None,
         return None
 
 
-def lightcurve(path: Path, frame, target: str, offsets: bool = True) -> Optional[Path]:
-    """Magnitude versus MJD, one series per band."""
+def lightcurve(path: Path, frame, target: str, offsets: bool = True,
+               color_max_separation_minutes: float = COLOR_MAX_SEPARATION_MINUTES) -> Optional[Path]:
+    """Side-by-side light curve and nearest-epoch colors, with QA warnings open."""
     try:
         primary = frame[frame["primary"].astype(bool)]
         if primary.empty:
@@ -180,8 +181,7 @@ def lightcurve(path: Path, frame, target: str, offsets: bool = True) -> Optional
         bands = [b for b in BAND_ORDER if b in set(primary["band"])]
         bands += [b for b in sorted(set(primary["band"])) if b not in bands]
 
-        fig, ax = plt.subplots(figsize=(9, 6.2))
-        step = 0.0
+        fig, (ax, color_ax) = plt.subplots(1, 2, figsize=(15, 6.2), sharex=True)
         for k, band in enumerate(bands):
             group = primary[primary["band"] == band].sort_values("mjd")
             shift = (len(bands) // 2 - k) * (1.0 if offsets else 0.0)
@@ -190,22 +190,20 @@ def lightcurve(path: Path, frame, target: str, offsets: bool = True) -> Optional
             limits = group[group["is_limit"].astype(bool) & np.isfinite(group["limit_mag"])]
             label = band + (f" {shift:+.0f}" if shift else "")
 
-            # A zero point borrowed from another band is a weaker measurement
-            # than a fitted one; draw it open so that is visible on the curve.
+            # Retain measured values, marking QA warnings with open symbols.
             flags = detected["flags"].fillna(0).astype(int) if "flags" in detected else 0
-            borrowed = (flags & FLAG_ZP_TRANSFERRED) > 0 if np.ndim(flags) else False
-            own = detected[~borrowed] if np.ndim(flags) else detected
+            flagged = (flags & OPEN_SYMBOL_FLAGS) > 0 if np.ndim(flags) else False
+            own = detected[~flagged] if np.ndim(flags) else detected
             ax.errorbar(own["mjd"], own["mag"] + shift, yerr=own["mag_err"],
                         fmt="o", ms=4.5, color=color, lw=0.8, capsize=2, label=label)
-            if np.ndim(flags) and borrowed.any():
-                sub = detected[borrowed]
+            if np.ndim(flags) and flagged.any():
+                sub = detected[flagged]
                 ax.errorbar(sub["mjd"], sub["mag"] + shift, yerr=sub["mag_err"],
                             fmt="o", ms=5.0, mfc="white", mec=color, ecolor=color,
                             lw=0.8, capsize=2)
             if len(limits):
                 ax.plot(limits["mjd"], limits["limit_mag"] + shift, "v", ms=5,
                         mfc="none", color=color)
-            step = shift
 
         ax.invert_yaxis()
         ax.set_xlabel("MJD")
@@ -213,12 +211,33 @@ def lightcurve(path: Path, frame, target: str, offsets: bool = True) -> Optional
         ax.set_title(f"{target} -- TTT")
         ax.grid(alpha=0.25, lw=0.5)
         handles, labels = ax.get_legend_handles_labels()
-        if any((frame["flags"].fillna(0).astype(int) & FLAG_ZP_TRANSFERRED) > 0):
+        if any((primary["flags"].fillna(0).astype(int) & OPEN_SYMBOL_FLAGS) > 0):
             from matplotlib.lines import Line2D
             handles.append(Line2D([], [], marker="o", ls="none", mfc="white",
                                   mec="#555753", color="#555753", ms=5))
-            labels.append("zero point from\nanother band")
+            labels.append("flagged measurement")
         ax.legend(handles, labels, ncol=2, fontsize=9, frameon=False)
+
+        colors = color_curve(frame, color_max_separation_minutes)
+        palette = {"g-r": "#2e8b57", "r-i": "#d2691e", "g-i": "#75507b"}
+        markers = {"g-r": "o", "r-i": "s", "g-i": "D"}
+        for name, group in colors.groupby("color", sort=False):
+            color = palette[name]
+            for flagged in (False, True):
+                points = group.loc[group["flagged"] == flagged]
+                color_ax.errorbar(points["mjd"], points["color_mag"], yerr=points["color_err"],
+                                  fmt=markers[name], ms=4.5, color=color,
+                                  mfc="white" if flagged else color, mec=color,
+                                  lw=0.8, capsize=2, label=name if not flagged else None)
+        color_ax.set_title(f"Nearest epochs (separation ≤ {color_max_separation_minutes:g} min)")
+        color_ax.set_ylabel("color (mag)")
+        color_ax.set_xlabel("MJD")
+        color_ax.grid(alpha=0.25, lw=0.5)
+        if colors.empty:
+            color_ax.text(0.5, 0.5, "No paired g/r/i detections within the time window",
+                          ha="center", va="center", transform=color_ax.transAxes, fontsize=9)
+        else:
+            color_ax.legend(ncol=3, fontsize=9, frameon=False)
         fig.tight_layout()
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)

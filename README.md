@@ -38,7 +38,8 @@ Outputs land in `runs/snname/` -- exactly as in tjophot:
 |---|---|
 | `snname_lightcurve.csv` | one row per epoch: the adopted measurement |
 | `snname_photometry_all.csv` | every method for every epoch |
-| `snname_lightcurve.png`, `snname_diagnostics.png` | light curve; seeing, ZP and depth over the campaign |
+| `snname_colors.csv` | nearest-epoch g-r, r-i, g-i values, errors and pair provenance |
+| `snname_lightcurve.png`, `snname_diagnostics.png` | light curve + colors; seeing, ZP and depth over the campaign |
 | `qa/<image>.png` | per-epoch panel: stamps, curve of growth, zero-point fit, kernel |
 | `run_summary.json`, `config_used.yaml`, `run.log` | exactly what was run |
 
@@ -146,9 +147,9 @@ Two more changes came out of the same run, and apply to every camera:
   (the PS1 *catalogue* agrees with Gaia to 20 mas), while every TTT frame is
   re-centred on Gaia. The reference WCS is now registered on the same
   catalogue before differencing (`subtraction.register_reference`).
-- **Host guard.** If every difference measurement of an epoch is flagged and
-  the fallback would be direct photometry that is more than 0.2 mag brighter,
-  the flagged difference is kept instead (`output.host_guard_mag`).
+- **Difference retention.** Automatic selection keeps usable difference
+  photometry even when subtraction QA fails. Flagged measurements are drawn
+  open; they are not replaced based on the difference/direct magnitude gap.
 
 And two that only showed on the TTT3 QHY600 in good seeing:
 
@@ -252,9 +253,13 @@ SN 2026abwp: 55 s for the first pass over twelve frames, 0.7 s when nothing has
 changed, 20 s when four new ones arrive -- and the incremental table is
 identical, column for column, to one built from scratch.
 
-A frame that the observatory has re-reduced since the table was written is
-measured again rather than keeping the old numbers, so replacing a file is
-enough to have it picked up.
+A frame that the observatory has re-reduced since it was measured is measured
+again rather than keeping the old numbers. Each successful measurement stores
+the input path, size and nanosecond modification/change timestamps in the full
+table's `input_fingerprint` column. Rewriting the table, measuring another band,
+or failing to remeasure a frame does not mark its new input as processed.
+Tables from older versions lack these signatures: their selected frames are
+remeasured once to establish them.
 
 Two things this deliberately does *not* do. It does not notice that you changed
 the configuration -- the rows already in the table were measured with the old
@@ -266,8 +271,54 @@ position: a resumed run keeps the one the first run adopted, recorded in
 exist and would otherwise move the position slightly every time a night is
 added, leaving one table measured at several places.
 
-`--no-resume` measures everything again without discarding the table, which is
-what to use when the code has changed but the configuration has not.
+`--no-resume` remeasures every selected frame without discarding other epochs,
+including when combined with `--bands`, `--skip` or `--max-images`. A successful
+remeasurement replaces all previous methods for that image, so an old PSF or
+difference measurement cannot survive a failed method in the new reduction.
+If the entire frame fails, its old rows remain and the changed input is retried
+next time. Use `--no-resume` when the code has changed but the configuration has
+not; `--append` remains accepted for compatibility but merging is automatic.
+
+With automatic method selection, usable difference photometry takes precedence
+over direct photometry, including difference-image upper limits. Subtraction
+chi2 failures, dipole warnings and kernel-sum outliers retain their measured
+values and flags. They appear as open symbols in the final figure. Calibration
+quality warnings and transferred zero points also use open symbols. This flags
+measurements for review without assuming a transient's light curve must be
+smooth. A flag is not a correction or a guarantee that the flux is accurate.
+
+Masked, saturated, off-image, uncalibrated, in-template or failed-PSF measurements
+still yield to valid alternatives, first within difference methods. Direct
+photometry is used when no valid difference is available. Detections precede
+limits within each family; PSF precedes aperture. Explicit
+`output.primary_method` overrides remain supported. `output.host_guard_mag` is
+deprecated and ignored. PSF failures carry `bad_psf` in `flags_str`; their raw photutils flags
+and fit diagnostics are retained as `psf_flags`, `psf_qfit` and `psf_cfit` in the
+full table. Failed fits cannot outrank clean aperture measurements or contribute
+to the PSF-to-aperture correction. Negative fitted flux alone is still a valid
+nondetection; partial fits and position-bound warnings remain diagnostics.
+
+The final figure has equal-width panels: the band-offset light curve on the
+left and **g-r, r-i and g-i** on the right. Colors use unshifted primary
+detections, pairing the closest available epochs first, with each exposure used
+at most once within each color. `output.color_max_separation_minutes` defaults
+to **30 minutes**. Pairs must share a magnitude system and photometry family
+(difference or direct); different calibrated detectors can be paired. No
+interpolation or upper-limit colors are used. Color times are the pair
+midpoints and errors are added in quadrature, assuming independent magnitude
+uncertainties; temporal evolution and calibration covariance are not included.
+Colors are open if either input has a plotting quality warning.
+`<target>_colors.csv` records values, errors, flags, both input images and their
+times, methods, detectors, and time separation. It is written even when QA
+figures are disabled; an empty pairing writes a header-only table and a
+message in the color panel. Normal resumed runs update selection and outputs
+without remeasuring unchanged images.
+
+Blank-aperture noise and limiting magnitudes use the Gaussian-calibrated median
+absolute deviation of aperture fluxes, without percentile trimming. Apertures
+overlapping positive or negative sources detected on a smoothed image, masked
+pixels, or missing data are rejected before measuring the scatter. Rerun with
+`--no-resume` to apply these photometry changes to previously measured frames.
 
 ---
 
@@ -307,14 +358,15 @@ frames in 1-3" seeing agree to within their errors (reduced chi2 0.2-1.1,
 from 1.7-15 before).
 
 ```bash
-pytest                                                            # unit tests, ~2 s
+pytest                                                         # offline regression tests
 python tests/selftest_injection.py ~/Desktop/TTT/<a frame>.fits   # offline, ~2 min
 ```
 
 `pytest` needs no data, no network and no telescope: it checks the gain and
 binning arithmetic, the WCS rescaling under rebinning, the zero-point fit and
 its outlier rejection, the catalogue cuts, the band-to-band zero-point
-transfer, the primary-method choice and the host guard, the kernel solve (it
+transfer, flagged difference retention, nearest-epoch colors and plotting,
+resume and merge behavior, PSF failure flags, blank-aperture noise, the kernel solve (it
 recovers a known flux scale and a centred kernel from a synthetic field), and
 aperture photometry against an analytic Gaussian. `pip install -e ".[test]"`
 installs what it needs.

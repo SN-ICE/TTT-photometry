@@ -416,14 +416,12 @@ output:
   # upper limit. Read by the main path and by the zero-point transfer, which
   # each used to carry their own hard-coded 3.0.
   detection_snr: 3.0
-  # When every difference measurement of an epoch is flagged and the fallback
-  # would be direct photometry, keep the (flagged) difference instead if the
-  # direct value is brighter than it by more than this: 0.2 mag means the host
-  # supplies 17 per cent of the direct flux, already worse than a difference
-  # that only failed the dipole test. (0.75 let two 2026abgb r epochs through
-  # 0.6-0.7 mag too bright.) Only differences whose kernel solved qualify.
-  # null switches this off.
+  # Deprecated, accepted for compatibility. Auto now retains usable difference
+  # measurements regardless of subtraction QA warnings or the direct/diff gap.
   host_guard_mag: 0.2
+  # Nearest available detections, one use per exposure within each color.
+  # Pair only the same magnitude system and direct/difference family.
+  color_max_separation_minutes: 30.0
   write_qa_plots: true         # the per-epoch qa/<image>.png panels and the light curve
   write_diagnostics: true      # the campaign-wide seeing / ZP / depth figure
   stamp_arcsec: 60.0           # size of the stamps in the per-epoch panel
